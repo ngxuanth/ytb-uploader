@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -54,6 +53,7 @@ type Process struct {
 
 	mu       sync.Mutex
 	killedBy string
+	sys      uintptr // job object on Windows; unused on Linux
 }
 
 // LineFunc receives each JSON line of the CLI's stdout as it arrives.
@@ -78,7 +78,7 @@ func Start(c Command, transcriptPath string, onLine LineFunc) (*Process, error) 
 	cmd := exec.Command(c.Bin, c.Args...)
 	cmd.Dir = c.Dir
 	cmd.Env = append(os.Environ(), c.Env...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = sessionSysProcAttr()
 	cmd.Stderr = errf
 	if c.Stdin != "" {
 		cmd.Stdin = strings.NewReader(c.Stdin)
@@ -97,6 +97,12 @@ func Start(c Command, transcriptPath string, onLine LineFunc) (*Process, error) 
 
 	parse := parsers[c.Parser]
 	p := &Process{cmd: cmd, started: time.Now(), done: make(chan struct{})}
+	if err := adoptSession(p); err != nil {
+		_ = cmd.Process.Kill()
+		out.Close()
+		errf.Close()
+		return nil, err
+	}
 	go func() {
 		defer close(p.done)
 		p.consume(io.TeeReader(stdout, out), parse, onLine)
@@ -106,12 +112,10 @@ func Start(c Command, transcriptPath string, onLine LineFunc) (*Process, error) 
 		p.res.Duration = time.Since(p.started)
 		if cmd.ProcessState != nil {
 			p.res.ExitCode = cmd.ProcessState.ExitCode()
-			if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-				p.res.Signaled = true
-			}
 		}
+		noteExit(p)
 		// The CLI is gone; make sure nothing it spawned outlives it.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		finishSession(p)
 	}()
 	return p, nil
 }
@@ -207,21 +211,15 @@ func (p *Process) Wait(ctx context.Context) (Result, error) {
 	}
 }
 
-// Kill stops the whole process group: SIGTERM, then SIGKILL after grace.
+// Kill stops the session and everything it spawned.
+// Linux signals the process group. Windows terminates the job object.
 func (p *Process) Kill(reason string, grace time.Duration) {
 	p.mu.Lock()
 	if p.killedBy == "" {
 		p.killedBy = reason
 	}
 	p.mu.Unlock()
-	pgid := -p.cmd.Process.Pid
-	_ = syscall.Kill(pgid, syscall.SIGTERM)
-	select {
-	case <-p.done:
-	case <-time.After(grace):
-		_ = syscall.Kill(pgid, syscall.SIGKILL)
-		<-p.done
-	}
+	terminateSession(p, grace)
 }
 
 // KilledBy is the reason given to the first Kill call, if any.

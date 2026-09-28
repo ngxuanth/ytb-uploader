@@ -21,7 +21,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/cdp"
@@ -133,24 +132,21 @@ func (c *Controller) Open(ctx context.Context, profileDir string) (*OpenResult, 
 }
 
 func (c *Controller) start(profileDir, url string) error {
-	cmd := exec.Command(c.Bin,
-		"--user-data-dir="+c.UserDataDir,
-		"--profile-directory="+profileDir,
-		"--remote-debugging-port="+strconv.Itoa(c.DebugPort),
+	args := []string{
+		"--user-data-dir=" + c.UserDataDir,
+		"--profile-directory=" + profileDir,
+		"--remote-debugging-port=" + strconv.Itoa(c.DebugPort),
 		"--remote-allow-origins=http://127.0.0.1",
 		"--no-first-run", "--no-default-browser-check",
-		// The upload window is usually behind other windows. On Wayland the
-		// compositor stops frame callbacks for it, so requestAnimationFrame
-		// never fires and the extension's "element is stable" waits hang
-		// until bmcp times out. Under X11 Chrome drives its own frames, and
-		// these flags keep it from throttling a hidden or occluded window.
-		"--ozone-platform=x11",
 		"--disable-backgrounding-occluded-windows",
 		"--disable-renderer-backgrounding",
 		"--disable-background-timer-throttling",
-		url)
+	}
+	args = append(args, chromePlatformArgs()...)
+	args = append(args, url)
+	cmd := exec.Command(c.Bin, args...)
 	// Chrome must outlive the session that opened it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = chromeSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start chrome: %w", err)
 	}
@@ -168,85 +164,6 @@ func (c *Controller) waitDebug(ctx context.Context, d time.Duration) error {
 		}
 		if err := sleep(ctx, 300*time.Millisecond); err != nil {
 			return err
-		}
-	}
-}
-
-// chromePIDs finds Chrome browser processes using this user-data-dir.
-func (c *Controller) chromePIDs() []int {
-	var out []int
-	ents, _ := os.ReadDir("/proc")
-	flag := "--user-data-dir=" + c.UserDataDir
-	for _, e := range ents {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
-		if err != nil {
-			continue
-		}
-		args := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
-		if len(args) == 0 || !strings.Contains(filepath.Base(args[0]), "chrom") {
-			continue
-		}
-		isBrowser, match := true, false
-		for _, a := range args[1:] {
-			if a == flag {
-				match = true
-			}
-			if strings.HasPrefix(a, "--type=") {
-				isBrowser = false // renderer/gpu/utility children
-			}
-		}
-		if match && isBrowser {
-			out = append(out, pid)
-		}
-	}
-	return out
-}
-
-func stopPIDs(ctx context.Context, pids []int) error {
-	for _, p := range pids {
-		_ = syscall.Kill(p, syscall.SIGTERM)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		alive := 0
-		for _, p := range pids {
-			if syscall.Kill(p, 0) == nil {
-				alive++
-			}
-		}
-		if alive == 0 {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			for _, p := range pids {
-				_ = syscall.Kill(p, syscall.SIGKILL)
-			}
-			return sleep(ctx, time.Second)
-		}
-		if err := sleep(ctx, 300*time.Millisecond); err != nil {
-			return err
-		}
-	}
-}
-
-// lock serialises Open across sessions (one Chrome for all profiles).
-func (c *Controller) lock(ctx context.Context) (func(), error) {
-	path := filepath.Join(c.UserDataDir, ".uploader.lock")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	for {
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
-			return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
-		}
-		if err := sleep(ctx, 200*time.Millisecond); err != nil {
-			f.Close()
-			return nil, err
 		}
 	}
 }
