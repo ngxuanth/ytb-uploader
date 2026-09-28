@@ -1,10 +1,17 @@
 package harness
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"yt-uploader/internal/config"
+)
+
+// Dựng path theo OS đang chạy test, vì filepath trên Linux không tách theo \\.
+var (
+	testUserData   = filepath.Join("Chrome", "User Data")
+	testProfileDir = filepath.Join(testUserData, "Profile 1")
 )
 
 func TestBuildPromptIncludesChromeProfile(t *testing.T) {
@@ -12,13 +19,13 @@ func TestBuildPromptIncludesChromeProfile(t *testing.T) {
 		File: `D:\videos\a.mp4`,
 		Profile: config.Profile{
 			Name: "Kenh A",
-			Dir:  `C:\Chrome\User Data\Profile 1`,
+			Dir:  testProfileDir,
 		},
 	})
 	for _, want := range []string{
 		`D:\videos\a.mp4`,
 		"Kenh A",
-		`user-data-dir="C:\Chrome\User Data"`,
+		`user-data-dir="` + testUserData + `"`,
 		`profile-directory="Profile 1"`,
 		"Không bấm nút Connect",
 		"không sử dụng browser tool built-in",
@@ -48,7 +55,7 @@ func TestExpandArgsReplacesPrompt(t *testing.T) {
 		MCPConfigPath: "m.json",
 	}
 	args, viaStdin := expandArgs(cfg, "hello", Input{
-		Profile: config.Profile{Name: "Kenh", Dir: `C:\Chrome\User Data\Profile 1`},
+		Profile: config.Profile{Name: "Kenh", Dir: testProfileDir},
 	})
 	if viaStdin {
 		t.Fatal("co {prompt} thi khong dua stdin")

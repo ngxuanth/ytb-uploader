@@ -9,9 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"yt-uploader/internal/config"
@@ -67,6 +65,12 @@ func Ensure(ctx context.Context, cfg config.Config, profile config.Profile, log 
 	if err := waitDebug(ctx, cfg.ChromeDebugPort); err != nil {
 		return err
 	}
+	// Chrome đang chạy đã có extension: nạp lại sẽ reload nó, service worker cũ
+	// chết mà service worker mới chưa chắc lên kịp, nên chọn tab luôn.
+	if tabID, err := trySelectTab(ctx, cfg.ChromeDebugPort); err == nil {
+		log.Info("browsermcp da chon tab", slog.Int("tab_id", tabID), slog.String("profile", profile.Name))
+		return nil
+	}
 	// Chrome branded (từ bản 137, và hẳn từ 142) bỏ qua --load-extension.
 	// Nạp unpacked qua CDP sau khi debug port đã mở.
 	if err := loadUnpacked(ctx, cfg.ChromeDebugPort, extDir); err != nil {
@@ -86,57 +90,32 @@ type process struct {
 	cmd string
 }
 
-func processesContaining(substr string) ([]process, error) {
-	script := fmt.Sprintf(`Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('%s') } | ForEach-Object { Write-Output ($_.ProcessId.ToString() + [char]9 + $_.CommandLine) }`, strings.ReplaceAll(substr, "'", "''"))
-	out, err := exec.Command("powershell", "-NoProfile", "-Command", script).Output()
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("liet ke chrome: %w (%s)", err, truncate(string(ee.Stderr), 300))
-		}
-		return nil, fmt.Errorf("liet ke chrome: %w", err)
-	}
-	var procs []process
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		pidText, cmd, ok := strings.Cut(line, "\t")
-		if !ok {
-			continue
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(pidText))
-		if err != nil {
-			continue
-		}
-		procs = append(procs, process{pid: pid, cmd: cmd})
-	}
-	return procs, nil
-}
-
 func runningWanted(procs []process, userData, profileName, extDir string, port int) bool {
 	portFlag := fmt.Sprintf("--remote-debugging-port=%d", port)
 	for _, p := range procs {
-		if strings.Contains(p.cmd, userData) &&
-			strings.Contains(p.cmd, profileName) &&
-			strings.Contains(p.cmd, extDir) &&
-			strings.Contains(p.cmd, portFlag) {
+		if hasFlag(p.cmd, "--user-data-dir="+userData) &&
+			hasFlag(p.cmd, "--profile-directory="+profileName) &&
+			hasFlag(p.cmd, "--load-extension="+extDir) &&
+			hasFlag(p.cmd, portFlag) {
 			return true
 		}
 	}
 	return false
 }
 
-func stopProcesses(procs []process) error {
-	seen := map[int]bool{}
-	for _, p := range procs {
-		if seen[p.pid] {
-			continue
+// hasFlag khớp cả giá trị của flag, để profile "kenh1" không khớp "kenh10".
+// Sau giá trị là hết chuỗi, dấu cách, hoặc dấu " (Windows quote arg có dấu cách).
+func hasFlag(cmd, flag string) bool {
+	for rest := cmd; ; {
+		i := strings.Index(rest, flag)
+		if i < 0 {
+			return false
 		}
-		seen[p.pid] = true
-		_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.pid)).Run()
+		rest = rest[i+len(flag):]
+		if rest == "" || rest[0] == ' ' || rest[0] == '"' {
+			return true
+		}
 	}
-	return nil
 }
 
 func waitGone(ctx context.Context, userData string) error {
@@ -173,9 +152,7 @@ func startChrome(bin, userData, profileName, extDir string, port int) error {
 		youtubeURL,
 	}
 	cmd := exec.Command(bin, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | 0x00000008, // DETACHED_PROCESS
-	}
+	detach(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("khong mo duoc chrome: %w", err)
 	}

@@ -2,3 +2,8 @@ chrome-profile/
 *.exe
 *.log
 redis_data/
+bin/
+videos-to-upload/
+logs/
+browsermcp.json
+.env.sh
