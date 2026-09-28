@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/chromectl"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/harness"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/prompt"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/session"
@@ -141,12 +142,16 @@ func try(args []string) error {
 			}
 		}()
 	}
+	chrome, err := (&chromectl.Controller{Bin: *chromeBin, UserDataDir: absUDD, ExtensionDir: absExt}).Isolated(ctx, *profile, *debugPort)
+	if err != nil {
+		return err
+	}
 	out, err := session.Run(ctx, session.Config{
 		ID: sessionID, Dir: sessionDir, UploadDir: uploadDir, Prompt: prompt.Upload,
 		Spec: spec, BMCP: *bmcp, Port: *port, Launcher: self,
 		ChromeEnv: map[string]string{
-			envChromeBin: *chromeBin, envUserDataDir: absUDD, envDebugPort: fmt.Sprint(*debugPort),
-			envExtensionDir: absExt, envProfileDir: *profile, envWSPort: fmt.Sprint(*port),
+			envChromeBin: chrome.Bin, envUserDataDir: chrome.UserDataDir, envDebugPort: fmt.Sprint(chrome.DebugPort),
+			envExtensionDir: chrome.ExtensionDir, envProfileDir: *profile, envWSPort: fmt.Sprint(*port),
 		},
 		Task:    session.Endpoint{URL: "http://" + taskLn.Addr().String() + "/mcp", Token: be.token},
 		Report:  session.Endpoint{URL: "http://" + reportLn.Addr().String() + "/mcp", Token: be.token},

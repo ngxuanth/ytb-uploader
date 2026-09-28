@@ -4,6 +4,7 @@ package chromectl
 
 import (
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,10 +66,82 @@ func (c *Controller) chromePIDs() []int {
 }
 
 func chromeBrowserMatch(cmd, userDataFlag string) bool {
-	if cmd == "" || !strings.Contains(cmd, userDataFlag) {
+	if cmd == "" || strings.Contains(cmd, "--type=") {
 		return false
 	}
-	return !strings.Contains(cmd, "--type=")
+	i := strings.Index(cmd, userDataFlag)
+	if i < 0 {
+		return false
+	}
+	end := i + len(userDataFlag)
+	if end >= len(cmd) {
+		return true
+	}
+	switch cmd[end] {
+	case ' ', '"', '\t', '\r', '\n':
+		return true
+	default:
+		// chrome-profile must not match chrome-profile-ports or a longer path.
+		return false
+	}
+}
+
+func linkDir(link, target string) error {
+	target, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	if err := os.Mkdir(link, 0o700); err != nil {
+		return err
+	}
+	made := true
+	defer func() {
+		if made {
+			_ = os.Remove(link)
+		}
+	}()
+	p, err := windows.UTF16PtrFromString(link)
+	if err != nil {
+		return err
+	}
+	h, err := windows.CreateFile(p, windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(h)
+	if err := setMountPoint(h, target); err != nil {
+		return err
+	}
+	made = false
+	return nil
+}
+
+// setMountPoint turns an empty directory into a junction to target.
+func setMountPoint(h windows.Handle, target string) error {
+	sub := utf16.Encode([]rune(`\??\` + target))
+	printName := utf16.Encode([]rune(target))
+	bufBytes := (len(sub) + 1 + len(printName) + 1) * 2
+	raw := make([]byte, 16+bufBytes)
+	binary.LittleEndian.PutUint32(raw[0:], 0xA0000003) // IO_REPARSE_TAG_MOUNT_POINT
+	binary.LittleEndian.PutUint16(raw[4:], uint16(8+bufBytes))
+	binary.LittleEndian.PutUint16(raw[10:], uint16(len(sub)*2))
+	binary.LittleEndian.PutUint16(raw[12:], uint16((len(sub)+1)*2))
+	binary.LittleEndian.PutUint16(raw[14:], uint16(len(printName)*2))
+	off := 16
+	for _, u := range sub {
+		binary.LittleEndian.PutUint16(raw[off:], u)
+		off += 2
+	}
+	off += 2
+	for _, u := range printName {
+		binary.LittleEndian.PutUint16(raw[off:], u)
+		off += 2
+	}
+	var n uint32
+	return windows.DeviceIoControl(h, 0x000900A4, &raw[0], uint32(len(raw)), nil, 0, &n, nil)
 }
 
 func processCommandLine(pid uint32) string {

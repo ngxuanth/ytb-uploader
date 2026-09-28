@@ -30,9 +30,12 @@ func chromeCheck(args []string) error {
 	}
 	udd, _ := filepath.Abs(*userDataDir)
 	ext, _ := filepath.Abs(*extDir)
-	c := &chromectl.Controller{Bin: *chromeBin, UserDataDir: udd, DebugPort: *debugPort, ExtensionDir: ext}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	c, err := (&chromectl.Controller{Bin: *chromeBin, UserDataDir: udd, ExtensionDir: ext}).Isolated(ctx, *profile, *debugPort)
+	if err != nil {
+		return err
+	}
 
 	ps, err := c.Profiles()
 	if err != nil {

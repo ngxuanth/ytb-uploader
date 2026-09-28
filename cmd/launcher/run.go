@@ -301,13 +301,23 @@ func (a *agent) execute(ctx context.Context, cancel context.CancelFunc, msg wire
 		a.fail(task, err)
 		return
 	}
-	logf("task %s profile %s port %d", task.TaskID, task.ProfileDirectory, port)
+	debugPort, err := session.FreePort()
+	if err != nil {
+		a.fail(task, err)
+		return
+	}
+	chrome, err := a.chrome.Isolated(ctx, task.ProfileDirectory, debugPort)
+	if err != nil {
+		a.fail(task, err)
+		return
+	}
+	logf("task %s profile %s bmcp %d debug %d", task.TaskID, task.ProfileDirectory, port, chrome.DebugPort)
 	out, err := session.Run(ctx, session.Config{
 		ID: task.TaskID, Dir: sessionDir, UploadDir: uploadDir, Prompt: prompt.Upload,
 		Spec: a.spec, BMCP: a.bmcp, Port: port, Launcher: a.launcher,
 		ChromeEnv: map[string]string{
-			envChromeBin: a.chrome.Bin, envUserDataDir: a.chrome.UserDataDir,
-			envDebugPort: fmt.Sprint(a.chrome.DebugPort), envExtensionDir: a.chrome.ExtensionDir,
+			envChromeBin: chrome.Bin, envUserDataDir: chrome.UserDataDir,
+			envDebugPort: fmt.Sprint(chrome.DebugPort), envExtensionDir: chrome.ExtensionDir,
 			envProfileDir: task.ProfileDirectory, envWSPort: fmt.Sprint(port),
 		},
 		Task:    session.Endpoint{URL: msg.TaskMCP.URL, Token: msg.TaskMCP.Token},

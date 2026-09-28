@@ -2,10 +2,9 @@
 // profile's Browser MCP extension, installs it when missing and points it at
 // the session's bmcp port. It is what the "chrome" MCP tools call.
 //
-// All profiles live in one user-data-dir, so they share one Chrome process
-// and one debugging port. Chrome is only restarted when it runs without the
-// debugging port; once it has one it is never restarted again, so a session
-// setting up one profile cannot disturb another profile's upload.
+// Profiles are discovered in UserDataDir. Each running profile is opened from
+// its own user-data-dir and debugging port (see Isolated), so one session
+// exiting cannot take down the Chrome another profile is using.
 package chromectl
 
 import (
