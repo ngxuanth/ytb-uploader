@@ -292,6 +292,7 @@ func (c *Controller) codeHash() string {
 
 // unpackedID is the id Chrome gives an unpacked extension without a "key":
 // the first 128 bits of SHA-256 of its absolute path, as letters a-p.
+// pathIDBytes matches the bytes Chrome hashes (UTF-8 on Linux, UTF-16LE on Windows).
 func unpackedID(dir string) string {
 	if dir == "" {
 		return ""
@@ -303,11 +304,15 @@ func unpackedID(dir string) string {
 	if real, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = real
 	}
-	sum := sha256.Sum256([]byte(abs))
+	return extensionID(pathIDBytes(abs))
+}
+
+func extensionID(b []byte) string {
+	sum := sha256.Sum256(b)
 	id := make([]byte, 32)
-	for i, b := range sum[:16] {
-		id[2*i] = 'a' + b>>4
-		id[2*i+1] = 'a' + b&0xf
+	for i, c := range sum[:16] {
+		id[2*i] = 'a' + c>>4
+		id[2*i+1] = 'a' + c&0xf
 	}
 	return string(id)
 }

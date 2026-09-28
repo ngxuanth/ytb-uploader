@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+func pathIDBytes(path string) []byte { return []byte(path) }
+
 func chromePlatformArgs() []string {
 	// On Wayland a covered window stops painting and the extension hangs.
 	// X11 lets Chrome drive its own frames.

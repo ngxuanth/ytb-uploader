@@ -9,10 +9,26 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+// pathIDBytes is the path Chrome hashes for an unpacked extension id.
+// On Windows that is the UTF-16LE path, with the drive letter uppercased.
+func pathIDBytes(path string) []byte {
+	if len(path) >= 2 && path[0] >= 'a' && path[0] <= 'z' && path[1] == ':' {
+		path = string(path[0]-'a'+'A') + path[1:]
+	}
+	units := utf16.Encode([]rune(path))
+	b := make([]byte, len(units)*2)
+	for i, u := range units {
+		b[i*2] = byte(u)
+		b[i*2+1] = byte(u >> 8)
+	}
+	return b
+}
 
 func chromePlatformArgs() []string { return nil }
 
