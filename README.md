@@ -38,7 +38,7 @@ Với hermes, dán khối trong [hermes/mcp_servers.yaml.template](hermes/mcp_se
 ./start.sh                                   # server trên 127.0.0.1:8090 + launcher (hermes), log trong data/
 curl 127.0.0.1:8090/agent                    # launcher đã kết nối chưa
 curl -XPOST 127.0.0.1:8090/uploads -H 'content-type: application/json' -d '{
-  "profile": "kenh1", "channel": "UC...", "video": "/đường/dẫn/video.mp4",
+  "profile": "kenh1", "video": "/đường/dẫn/video.mp4",
   "title": "Tiêu đề", "description": "Mô tả", "visibility": "private"
 }'
 curl 127.0.0.1:8090/tasks/<task_id>          # trạng thái, các lần gọi report_mcp, finish_reported, session_ended
@@ -51,7 +51,7 @@ Biến cho `start.sh`: `ADDR` (mặc định `127.0.0.1:8090`), `HARNESS` (mặc
 Chạy thử một lần, không cần server:
 
 ```sh
-./launcher try -video a.mp4 -channel UC... -profile kenh1 -title "Tiêu đề" [-harness hermes]
+./launcher try -video a.mp4 -profile kenh1 -title "Tiêu đề" [-channel UC...] [-harness hermes]
 ./launcher chrome-check -profile kenh1       # chỉ kiểm tra Chrome + extension, không dùng LLM
 ```
 

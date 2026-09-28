@@ -33,7 +33,10 @@ S4. extension_status until connected is true (retry a few times, a few seconds a
 S5. Confirm from the browser side: browser_evaluate "location.href". If it fails after S4 said connected, retry S3-S5 once; if still failing, task_finish failed with error_code BROWSER_NOT_CONNECTED.
 
 Playbook (YouTube Studio)
-A. PREPARING: browser_navigate to https://studio.youtube.com/channel/<channel_id>/videos/upload?d=ud . If you land on accounts.google.com the profile is logged out: task_finish needs_attention LOGIN_REQUIRED (a person logs in; never type credentials). If the URL is not for <channel_id>, it is WRONG_CHANNEL. If Studio says the daily upload limit was reached, it is UPLOAD_LIMIT.
+A. PREPARING: open the upload page, then attach the file in step B.
+   - If task_claim has channel_id: browser_navigate to https://studio.youtube.com/channel/<channel_id>/videos/upload?d=ud . If the URL is not for that channel_id, task_finish needs_attention WRONG_CHANNEL.
+   - If task_claim has no channel_id: browser_navigate to https://studio.youtube.com/ . Studio redirects to the profile's default channel. Read that channel id from the URL and browser_navigate to https://studio.youtube.com/channel/<that id>/videos/upload?d=ud . Do not report WRONG_CHANNEL.
+   - Either way: if you land on accounts.google.com the profile is logged out: task_finish needs_attention LOGIN_REQUIRED (a person logs in; never type credentials). If Studio says the daily upload limit was reached, it is UPLOAD_LIMIT.
 B. ATTACHING: browser_upload_file with selector "input[type=file]" and filePath = file_path from task_claim. Wait until the details form appears, read the link from "ytcp-uploads-dialog .video-url-fadeable a", then call task_video_created.
 C. FILLING_METADATA:
    - Title and description are contenteditable. Never assign .value with browser_evaluate: that leaves the filename, so the title stays "video". Snapshot, browser_click the title textbox, then browser_type metadata.title into that same ref (browser_type replaces the current text). Do the same for the description textbox. Read it back with browser_evaluate "document.querySelector('#title-textarea #textbox').textContent" (not value; the dialog has no ytcp-video-details-editor). It must equal metadata.title before Next; if it does not, type it once more.

@@ -38,7 +38,7 @@ func try(args []string) error {
 	port := fs.Int("port", 9009, "bmcp WebSocket port the profile's extension connects to")
 	video := fs.String("video", "", "video file to upload (required)")
 	thumb := fs.String("thumbnail", "", "thumbnail image")
-	channel := fs.String("channel", "", "YouTube channel id UC... (required)")
+	channel := fs.String("channel", "", "YouTube channel id UC... (optional; empty uses the profile's default channel)")
 	title := fs.String("title", "", "title (default: file name)")
 	desc := fs.String("description", "", "description")
 	visibility := fs.String("visibility", "private", "public, unlisted or private")
@@ -56,9 +56,9 @@ func try(args []string) error {
 	chromeBin := fs.String("chrome-bin", "google-chrome", "Chrome binary")
 	_ = fs.Parse(args)
 
-	if *video == "" || *channel == "" || *profile == "" {
+	if *video == "" || *profile == "" {
 		fs.Usage()
-		return errors.New("-video, -channel and -profile are required")
+		return errors.New("-video and -profile are required")
 	}
 	self, err := os.Executable()
 	if err != nil {

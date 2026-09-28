@@ -18,7 +18,7 @@ type taskView struct {
 	TaskID          string         `json:"task_id"`
 	Attempt         int            `json:"attempt"`
 	Profile         string         `json:"profile"`
-	Channel         string         `json:"channel"`
+	Channel         string         `json:"channel,omitempty"`
 	Title           string         `json:"title"`
 	Visibility      string         `json:"visibility"`
 	Status          wire.Status    `json:"status"`

@@ -344,6 +344,20 @@ func events(v taskView) []string {
 	return out
 }
 
+func TestUploadWithoutChannelUsesProfileDefault(t *testing.T) {
+	h := newHarness(t)
+	created := h.post("/uploads", uploadIn{Profile: "isophtalic", Video: h.video, Title: "Title"}, http.StatusAccepted)
+	if created.Status != wire.StatusAssigned || created.Channel != "" {
+		t.Fatalf("created: %+v", created)
+	}
+	var assign wire.Assign
+	h.expect(wire.MsgAssign, &assign)
+	claim := h.call(assign.TaskMCP, "task_claim", map[string]any{})
+	if claim["channel_id"] != nil || claim["profile_directory"] != "isophtalic" {
+		t.Fatalf("claim: %v", claim)
+	}
+}
+
 func TestTaskLifecycleIsTrackedFromReportMCP(t *testing.T) {
 	h := newHarness(t)
 	created := h.post("/uploads", uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video, Title: "Title"}, http.StatusAccepted)

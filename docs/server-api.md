@@ -85,7 +85,7 @@ Các trường trống bị bỏ khỏi JSON, trừ `attempt`, `progress`, `fini
 |---|---|
 | `task_id` | id do server cấp (`srv-xxxxxxxx`) |
 | `attempt` | lần chạy hiện tại, bắt đầu từ 1, tăng sau mỗi lần retry |
-| `profile`, `channel` | Chrome profile và kênh YouTube (UC…) |
+| `profile`, `channel` | Chrome profile và kênh YouTube (UC…). `channel` trống khi upload không chỉ định kênh: agent dùng kênh mặc định của profile |
 | `title`, `visibility` | metadata gửi cho agent |
 | `status` | trạng thái, xem [vòng đời](#vòng-đời-một-task) |
 | `step`, `progress`, `message` | lần `task_report` gần nhất của lần chạy hiện tại |
@@ -125,7 +125,7 @@ Body:
 | Trường | Bắt buộc | Ý nghĩa |
 |---|---|---|
 | `profile` | có | tên thư mục profile trong `-profiles` |
-| `channel` | có | id kênh `UC…` |
+| `channel` | không | id kênh `UC…`. Bỏ trống thì agent mở YouTube Studio và dùng kênh mặc định của profile |
 | `video` | có | đường dẫn file video **trên máy chạy server** |
 | `thumbnail` | không | đường dẫn ảnh thumbnail trên máy chạy server |
 | `title` | không | mặc định là tên file video, bỏ đuôi |
@@ -134,7 +134,7 @@ Body:
 
 ```
 curl -XPOST 127.0.0.1:8090/uploads -H 'content-type: application/json' -d '{
-  "profile": "isophtalic", "channel": "UCbHiIpWVK_jqIbinKacp2Ig",
+  "profile": "isophtalic",
   "video": "/home/me/videos/a.mp4", "title": "Đây là video test", "visibility": "private"
 }'
 ```
@@ -246,7 +246,7 @@ Upload rồi theo dõi đến khi agent gọi `task_finish` hoặc phiên thoát
 
 ```sh
 id=$(curl -s -XPOST 127.0.0.1:8090/uploads -H 'content-type: application/json' \
-  -d '{"profile":"isophtalic","channel":"UC...","video":"/path/a.mp4","title":"Đây là video test"}' | jq -r .task_id)
+  -d '{"profile":"isophtalic","video":"/path/a.mp4","title":"Đây là video test"}' | jq -r .task_id)
 
 while :; do
   t=$(curl -s 127.0.0.1:8090/tasks/$id)

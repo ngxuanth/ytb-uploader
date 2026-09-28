@@ -1,6 +1,6 @@
 // Command server is a stand-in for the upload server. It serves task_mcp and
 // report_mcp plus a small REST API (see api.go). An upload starts only when
-// POST /uploads names a profile and a channel; the connected agent then
+// POST /uploads names a profile and a video; channel is optional. The connected agent then
 // receives that task over WebSocket. Every task_mcp / report_mcp call updates
 // the task, and tasks are saved to a JSON file.
 package main
@@ -161,8 +161,8 @@ func (st *state) upload(c fiber.Ctx) error {
 	in.Profile = strings.TrimSpace(in.Profile)
 	in.Channel = strings.TrimSpace(in.Channel)
 	in.Video = strings.TrimSpace(in.Video)
-	if in.Profile == "" || in.Channel == "" || in.Video == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "profile, channel and video are required"})
+	if in.Profile == "" || in.Video == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "profile and video are required"})
 	}
 	if in.Visibility == "" {
 		in.Visibility = "private"
