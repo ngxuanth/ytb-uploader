@@ -1,9 +1,7 @@
-chrome-profile/
+node_modules/
 *.exe
-*.log
-redis_data/
-bin/
-videos-to-upload/
-logs/
-browsermcp.json
-.env.sh
+profile/
+data/
+/launcher
+/server
+resource/bmcp/dist/

@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "outDir": "dist",
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ],
+      "@repo/config/*": [
+        "./shims/config/*"
+      ],
+      "@repo/types/*": [
+        "./shims/types/*"
+      ],
+      "@repo/messaging/*": [
+        "./shims/messaging/*"
+      ],
+      "@repo/utils": [
+        "./shims/utils/index.ts"
+      ],
+      "@r2r/messaging/*": [
+        "./shims/messaging/*"
+      ]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "shims/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

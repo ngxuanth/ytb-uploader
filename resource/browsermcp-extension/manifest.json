@@ -1,0 +1,63 @@
+{
+  "action": {
+    "default_icon": "/icon/48.png",
+    "default_popup": "popup.html",
+    "default_title": "Browser MCP"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+J"
+      }
+    }
+  },
+  "content_scripts": [
+    {
+      "js": [
+        "content-scripts/content.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "default_locale": "en",
+  "externally_connectable": {
+    "matches": [
+      "https://*.browsermcp.io/*"
+    ]
+  },
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "icons": {
+    "128": "icon/128.png",
+    "16": "icon/16.png",
+    "32": "icon/32.png",
+    "48": "icon/48.png"
+  },
+  "manifest_version": 3,
+  "name": "Browser MCP Local",
+  "permissions": [
+    "alarms",
+    "debugger",
+    "scripting",
+    "storage",
+    "tabs",
+    "webNavigation"
+  ],
+  "version": "1.4.0",
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "resources": [
+        "content-scripts/content.css"
+      ]
+    }
+  ]
+}

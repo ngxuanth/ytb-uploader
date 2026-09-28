@@ -1,0 +1,39 @@
+# Dán khối này vào mcp_servers: trong $HERMES_HOME/config.yaml (mặc định ~/.hermes/config.yaml).
+#
+# Hermes chỉ đọc MCP server từ file config này. Launcher export các biến ${...}
+# cho từng phiên, hermes thay chúng vào lúc khởi động server. Chrome do
+# chrome_mcp mở chỉ nhận các biến có trong env: bên dưới, nên phải giữ
+# XAUTHORITY / XDG_*: thiếu chúng Chrome (chạy X11) thoát ngay khi mở.
+mcp_servers:
+  bmcp:
+    command: node
+    args: ["${UPLOADER_BMCP}"]
+    env:
+      BMCP_WS_PORT: "${BMCP_WS_PORT}"
+      BMCP_UPLOAD_DIR: "${BMCP_UPLOAD_DIR}"
+      BMCP_NO_KILL: "1"
+      NODE_NO_WARNINGS: "1"
+  task_mcp:
+    url: "${UPLOADER_TASK_MCP_URL}"
+    headers:
+      Authorization: "Bearer ${UPLOADER_TASK_MCP_TOKEN}"
+  report_mcp:
+    url: "${UPLOADER_REPORT_MCP_URL}"
+    headers:
+      Authorization: "Bearer ${UPLOADER_REPORT_MCP_TOKEN}"
+  chrome_mcp:
+    command: "${UPLOADER_LAUNCHER}"
+    args: ["mcp-chrome"]
+    env:
+      UPLOADER_CHROME_BIN: "${UPLOADER_CHROME_BIN}"
+      UPLOADER_USER_DATA_DIR: "${UPLOADER_USER_DATA_DIR}"
+      UPLOADER_DEBUG_PORT: "${UPLOADER_DEBUG_PORT}"
+      UPLOADER_EXTENSION_DIR: "${UPLOADER_EXTENSION_DIR}"
+      UPLOADER_PROFILE_DIR: "${UPLOADER_PROFILE_DIR}"
+      BMCP_WS_PORT: "${BMCP_WS_PORT}"
+      DISPLAY: "${DISPLAY}"
+      WAYLAND_DISPLAY: "${WAYLAND_DISPLAY}"
+      DBUS_SESSION_BUS_ADDRESS: "${DBUS_SESSION_BUS_ADDRESS}"
+      XAUTHORITY: "${XAUTHORITY}"
+      XDG_RUNTIME_DIR: "${XDG_RUNTIME_DIR}"
+      XDG_SESSION_TYPE: "${XDG_SESSION_TYPE}"
