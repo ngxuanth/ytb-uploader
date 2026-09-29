@@ -13,7 +13,7 @@
 ## Chạy server
 
 ```
-./server [-addr 127.0.0.1:8090] [-profiles profile] [-data data/server/tasks.json] [-finish-grace 45s] [-recheck-processing 10m]
+./server [-addr 127.0.0.1:8090] [-profiles profile] [-data data/server/tasks.json] [-finish-grace 45s] [-recheck-processing 0]
 ./launcher run -server ws://127.0.0.1:8090/ws
 ```
 
@@ -22,7 +22,7 @@
 | `-addr` | `127.0.0.1:8090` | địa chỉ lắng nghe |
 | `-profiles` | `profile` | thư mục Chrome user-data-dir; mỗi thư mục con có file `Preferences` là một profile hợp lệ cho `POST /uploads` |
 | `-data` | `data/server/tasks.json` | file lưu task; ghi file tạm rồi rename sau mỗi thay đổi |
-| `-recheck-processing` | `10m` | video mà Studio còn đang xử lý thì tự kiểm tra lại sau khoảng này, tối đa 6 lần. `0` là tắt |
+| `-recheck-processing` | `0` | video mà Studio còn đang xử lý thì tự kiểm tra lại sau khoảng này, tối đa 6 lần. `0` (mặc định) là tắt: chỉ kiểm tra khi được gọi |
 | `-finish-grace` | `45s` | sau `task_finish`, nếu phiên hermes chưa thoát trong khoảng này thì server gửi `cancel` cho launcher để dừng nó. `0` là không bao giờ |
 
 API không có xác thực và chỉ nên lắng nghe trên `127.0.0.1`. Mọi body đều là JSON. Lỗi luôn có dạng `{"error": "..."}`.
@@ -43,6 +43,7 @@ POST /uploads ──► hàng đợi "kenh2": []         đang chạy: t5 ──
   - launcher báo `session_ended`, tức phiên hermes đã thoát và Chrome đã rảnh. `task_finish` thôi thì **chưa** giải phóng, vì hermes có thể vẫn đang dùng Chrome. Nếu phiên vẫn chạy sau `-finish-grace` (mặc định 45 giây) kể từ `task_finish`, server tự gửi `cancel` cho launcher để hàng đợi không bị kẹt. Status của task giữ nguyên.
   - launcher từ chối task (`reject`).
   - task bị cancel trong lúc launcher giữ nó không còn kết nối.
+- **Đóng Chrome:** sau khi profile rảnh, launcher giữ Chrome của profile thêm 20 giây (`-chrome-idle-close`) cho task kế tiếp trong hàng, rồi đóng Chrome nếu không có task nào tới.
 - **Launcher mất kết nối:** task đang chạy vẫn giữ profile, vì phiên có thể còn chạy và launcher sẽ kết nối lại. Khi launcher đó gửi `hello` mà không còn báo task này là đang chạy (`running_task_id`), tức nó đã khởi động lại, task chuyển sang `LOST` và profile được giải phóng. Launcher không quay lại thì dùng `cancel` để giải phóng.
 - Hàng đợi được suy ra từ các task đang `QUEUED` trong `tasks.json`, nên server khởi động lại vẫn giữ nguyên hàng đợi.
 
@@ -177,11 +178,10 @@ curl -XPOST 127.0.0.1:8090/uploads -H 'content-type: application/json' -d '{
 
 ### Trạng thái video trên YouTube
 
-Launcher đọc trạng thái video ngay trong Chrome của profile (danh sách nội dung và trang edit của Studio), bằng script, không dùng LLM:
+Launcher đọc trạng thái video ngay trong Chrome của profile (danh sách nội dung và trang edit của Studio), bằng script, không dùng LLM. Upload xong thì không đọc; trạng thái chỉ được đọc khi được gọi:
 
-- **Ngay sau khi upload:** sau khi Lưu, script đọc trạng thái rồi gửi `task_video_state` trước `task_finish`.
 - **Theo yêu cầu:** `POST /tasks/:id/video/check` xếp một task `check_video` vào hàng đợi của profile. Task này không có file, chỉ đọc Studio.
-- **Tự động:** nếu video còn đang xử lý, server tự xếp một lần kiểm tra lại sau `-recheck-processing`, tối đa 6 lần.
+- **Tự động (tắt mặc định):** chạy server với `-recheck-processing 10m` thì video còn đang xử lý được tự kiểm tra lại sau khoảng đó, tối đa 6 lần.
 
 Kết quả được lưu vào `video_state` của **task upload**:
 

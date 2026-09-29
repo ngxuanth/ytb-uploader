@@ -12,10 +12,32 @@ POST /uploads ─► server ─(WebSocket)─► launcher ─► hermes ─┬�
 - **launcher** (`cmd/launcher`): kết nối tới server, tải file của task về, rồi mở một phiên agent cho mỗi task, kèm 4 MCP server của phiên đó.
 - **bmcp** (`resource/bmcp`): MCP server `browser_*` (Browser MCP đã sửa: `browser_upload_file`, `browser_evaluate`, `browser_scroll`…).
 - **extension** (`resource/browsermcp-extension`): extension Chrome "Browser MCP Local", nhận lệnh từ bmcp và thao tác trên tab.
-- **playbook** (`pkg/playbook`): script làm đường chính của việc upload, không dùng LLM: mở trang upload, attach file, title, description, đối tượng người xem, "Tiếp", visibility, chờ upload, Lưu. Mỗi bước kiểm tra kết quả trên trang.
-- **prompt** (`pkg/prompt`): các bước upload cho agent, cùng prompt bàn giao khi script lỗi.
+- **playbook** (`internal/infra/studio`): script làm đường chính của việc upload, không dùng LLM: mở trang upload, attach file, title, description, đối tượng người xem, "Tiếp", visibility, chờ upload, Lưu. Mỗi bước kiểm tra kết quả trên trang.
+- **prompt** (`internal/infra/llm/prompt`): các bước upload cho agent, cùng prompt bàn giao khi script lỗi.
 
 Mỗi task chạy playbook trước. Script lỗi ở một bước thì launcher mở một phiên LLM **chỉ cho bước đó**, kiểm tra trang qua CDP, và khi điều kiện của bước đã đạt thì dừng LLM để script chạy tiếp. Nếu LLM sửa rồi mà bước vẫn lỗi, hoặc đã phải gọi LLM 2 lần, hoặc gặp bước script chưa làm (tags, playlists, hẹn giờ), thì LLM làm nốt task. Lúc đó file đã attach được giấu đi và `task_claim` trả `existing_video_id`, nên không có video trùng. Các lỗi đã biết (`LOGIN_REQUIRED`, `WRONG_CHANNEL`, `UPLOAD_LIMIT`) thì script tự kết thúc với `needs_attention`.
+
+## Cấu trúc code
+
+Code chia theo tầng (clean architecture). Tầng trong không import tầng ngoài: `domain` và `app` không import `adapter` hay `infra`.
+
+```
+cmd/server, cmd/launcher     chỉ đọc cờ và nối các tầng với nhau
+internal/contract            message WebSocket, trạng thái, mã lỗi dùng chung giữa server và launcher
+internal/domain/task         task và các luật của nó (hàng đợi theo profile, chuyển trạng thái, retry, huỷ); không I/O
+internal/app/taskservice     use case của server; I/O đi qua port (Repository, Profiles, Files, AgentConn)
+internal/app/agent           use case của launcher: nhận assign / cancel / drain, mỗi profile chỉ một task chạy
+internal/app/upload          một lần chạy task: playbook trước, LLM cho bước lỗi, LLM làm nốt khi cần (port: Tasks, Env, Script)
+internal/adapter/http        REST API (Fiber)
+internal/adapter/agentws     WebSocket phía server
+internal/adapter/agentclient WebSocket phía launcher (kết nối lại, heartbeat)
+internal/adapter/taskmcp     task_mcp / report_mcp (MCP server và client); taskmcpserver nối nó với taskservice
+internal/adapter/jsonstore   lưu task ra file JSON
+internal/adapter/studioenv   môi trường của một lần chạy: Chrome riêng của profile, playbook, phiên LLM, kiểm tra trang qua CDP
+internal/adapter/chromemcp   MCP server "chrome" cho LLM
+internal/adapter/localtask   task_mcp một task trong process, dùng cho `launcher try`
+internal/infra/...           chrome (+cdp), extension (driver), studio (playbook), llm (harness, session, prompt), localfs, download
+```
 
 ## Yêu cầu
 
@@ -66,5 +88,7 @@ Mỗi phiên có thư mục riêng `data/run/<task_id>/` chứa `prompt.txt`, `t
 
 - API không có xác thực: chỉ để server lắng nghe trên `127.0.0.1`.
 - Mỗi profile chỉ chạy một task một lúc: các task khác của cùng profile nằm trong hàng đợi (`GET /queues`) và được giao lần lượt khi phiên trước thoát. Các profile khác nhau chạy song song, mỗi profile trong một Chrome và một cổng debug riêng.
+- Chrome của một profile được giữ lại giữa các task liền nhau, và tự đóng khi task cuối đã xong được 20 giây mà không có task nào dùng tới (`launcher run -chrome-idle-close 20s`, `0` là không đóng). Task sau mở lại Chrome.
+- Upload xong thì không đọc trạng thái video. Muốn biết video đã xử lý xong chưa hay có bị hạn chế không thì gọi `POST /tasks/:id/video/check`.
 - Khi file trong `resource/browsermcp-extension` thay đổi, lần `extension_setup` tiếp theo tự reload extension.
 - Khi retry một task đã tạo video, agent được giao `existing_video_id` và sửa tiếp video đó chứ không upload lại. bmcp cũng từ chối attach cùng một file hai lần trong một phiên.
