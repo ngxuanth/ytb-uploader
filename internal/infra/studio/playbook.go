@@ -123,7 +123,8 @@ type Runner struct {
 	// changed for this long.
 	StallTimeout time.Duration
 	// StateAfterUpload reads the video's state in Studio after the save and
-	// reports it with task_video_state (on by default).
+	// reports it with task_video_state. Off by default: the state is read
+	// only when asked for (a check_video task).
 	StateAfterUpload bool
 }
 
@@ -134,7 +135,7 @@ func New(task Task, rep Reporter, logf func(string, ...any)) *Runner {
 	r := &Runner{
 		task: task, rep: rep, logf: logf, handedOff: map[string]bool{},
 		PollEvery: time.Second, StepTimeout: 45 * time.Second, UploadTimeout: 30 * time.Minute,
-		Settle: 2 * time.Second, StallTimeout: 10 * time.Minute, StateAfterUpload: true,
+		Settle: 2 * time.Second, StallTimeout: 10 * time.Minute,
 	}
 	if task.ExistingVideoID != "" {
 		r.videoID, r.videoURL, r.attached = task.ExistingVideoID, "https://youtu.be/"+task.ExistingVideoID, true

@@ -31,7 +31,7 @@ type Config struct {
 
 // DefaultConfig has the defaults of the server's flags.
 func DefaultConfig(base string) Config {
-	return Config{Base: base, FinishGrace: 45 * time.Second, Recheck: 10 * time.Minute}
+	return Config{Base: base, FinishGrace: 45 * time.Second, Recheck: 0}
 }
 
 // maxRechecks bounds the automatic checks of a video still processing.

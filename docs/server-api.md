@@ -13,7 +13,7 @@
 ## Chạy server
 
 ```
-./server [-addr 127.0.0.1:8090] [-profiles profile] [-data data/server/tasks.json] [-finish-grace 45s] [-recheck-processing 10m]
+./server [-addr 127.0.0.1:8090] [-profiles profile] [-data data/server/tasks.json] [-finish-grace 45s] [-recheck-processing 0]
 ./launcher run -server ws://127.0.0.1:8090/ws
 ```
 
@@ -22,7 +22,7 @@
 | `-addr` | `127.0.0.1:8090` | địa chỉ lắng nghe |
 | `-profiles` | `profile` | thư mục Chrome user-data-dir; mỗi thư mục con có file `Preferences` là một profile hợp lệ cho `POST /uploads` |
 | `-data` | `data/server/tasks.json` | file lưu task; ghi file tạm rồi rename sau mỗi thay đổi |
-| `-recheck-processing` | `10m` | video mà Studio còn đang xử lý thì tự kiểm tra lại sau khoảng này, tối đa 6 lần. `0` là tắt |
+| `-recheck-processing` | `0` | video mà Studio còn đang xử lý thì tự kiểm tra lại sau khoảng này, tối đa 6 lần. `0` (mặc định) là tắt: chỉ kiểm tra khi được gọi |
 | `-finish-grace` | `45s` | sau `task_finish`, nếu phiên hermes chưa thoát trong khoảng này thì server gửi `cancel` cho launcher để dừng nó. `0` là không bao giờ |
 
 API không có xác thực và chỉ nên lắng nghe trên `127.0.0.1`. Mọi body đều là JSON. Lỗi luôn có dạng `{"error": "..."}`.
@@ -177,11 +177,10 @@ curl -XPOST 127.0.0.1:8090/uploads -H 'content-type: application/json' -d '{
 
 ### Trạng thái video trên YouTube
 
-Launcher đọc trạng thái video ngay trong Chrome của profile (danh sách nội dung và trang edit của Studio), bằng script, không dùng LLM:
+Launcher đọc trạng thái video ngay trong Chrome của profile (danh sách nội dung và trang edit của Studio), bằng script, không dùng LLM. Upload xong thì không đọc; trạng thái chỉ được đọc khi được gọi:
 
-- **Ngay sau khi upload:** sau khi Lưu, script đọc trạng thái rồi gửi `task_video_state` trước `task_finish`.
 - **Theo yêu cầu:** `POST /tasks/:id/video/check` xếp một task `check_video` vào hàng đợi của profile. Task này không có file, chỉ đọc Studio.
-- **Tự động:** nếu video còn đang xử lý, server tự xếp một lần kiểm tra lại sau `-recheck-processing`, tối đa 6 lần.
+- **Tự động (tắt mặc định):** chạy server với `-recheck-processing 10m` thì video còn đang xử lý được tự kiểm tra lại sau khoảng đó, tối đa 6 lần.
 
 Kết quả được lưu vào `video_state` của **task upload**:
 

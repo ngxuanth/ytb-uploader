@@ -26,7 +26,7 @@ func main() {
 	profiles := flag.String("profiles", "profile", "directory whose subfolders are Chrome profiles")
 	data := flag.String("data", "data/server/tasks.json", "JSON file the tasks are saved to")
 	grace := flag.Duration("finish-grace", 45*time.Second, "after task_finish, stop a session that has not exited within this long (0 = never)")
-	recheck := flag.Duration("recheck-processing", 10*time.Minute, "check a video Studio still processes again after this long, up to 6 times (0 = never)")
+	recheck := flag.Duration("recheck-processing", 0, "check a video Studio still processes again after this long, up to 6 times (0 = never: only when asked)")
 	flag.Parse()
 	absProfiles, err := filepath.Abs(*profiles)
 	if err != nil {

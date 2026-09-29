@@ -88,5 +88,6 @@ Mỗi phiên có thư mục riêng `data/run/<task_id>/` chứa `prompt.txt`, `t
 
 - API không có xác thực: chỉ để server lắng nghe trên `127.0.0.1`.
 - Mỗi profile chỉ chạy một task một lúc: các task khác của cùng profile nằm trong hàng đợi (`GET /queues`) và được giao lần lượt khi phiên trước thoát. Các profile khác nhau chạy song song, mỗi profile trong một Chrome và một cổng debug riêng.
+- Upload xong thì không đọc trạng thái video. Muốn biết video đã xử lý xong chưa hay có bị hạn chế không thì gọi `POST /tasks/:id/video/check`.
 - Khi file trong `resource/browsermcp-extension` thay đổi, lần `extension_setup` tiếp theo tự reload extension.
 - Khi retry một task đã tạo video, agent được giao `existing_video_id` và sửa tiếp video đó chứ không upload lại. bmcp cũng từ chối attach cùng một file hai lần trong một phiên.

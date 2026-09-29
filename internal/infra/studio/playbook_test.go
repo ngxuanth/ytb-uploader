@@ -446,10 +446,22 @@ func TestRadiosAndSaveUseDOMClicksWithRealFallback(t *testing.T) {
 	}
 }
 
+func TestStateNotReadAfterUploadByDefault(t *testing.T) {
+	f, rep := newStudio(meta), &fakeReporter{}
+	if res := newRunner(meta, rep).Run(context.Background(), f); res.Outcome != Done {
+		t.Fatalf("result %+v", res)
+	}
+	if len(rep.states) != 0 {
+		t.Fatalf("state read after upload: %+v", rep.states)
+	}
+}
+
 func TestStateIsReadAndReportedAfterUpload(t *testing.T) {
 	f, rep := newStudio(meta), &fakeReporter{}
 	f.badges = []map[string]any{{"name": "sd", "label": "Đã xử lý xong độ phân giải chuẩn"}, {"name": "hd", "label": "Đang xử lý độ phân giải cao"}}
-	if res := newRunner(meta, rep).Run(context.Background(), f); res.Outcome != Done {
+	r := newRunner(meta, rep)
+	r.StateAfterUpload = true // off by default; see TestStateNotReadAfterUploadByDefault
+	if res := r.Run(context.Background(), f); res.Outcome != Done {
 		t.Fatalf("result %+v", res)
 	}
 	if len(rep.states) != 1 {
