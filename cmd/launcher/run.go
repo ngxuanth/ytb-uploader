@@ -38,6 +38,7 @@ func runAgent(args []string) error {
 	chromeBin := fs.String("chrome-bin", "google-chrome", "Chrome binary")
 	runner := fs.String("runner", upload.RunnerPlaybook, "playbook: script first, LLM only for failed steps; llm: an LLM session does every task")
 	idleClose := fs.Duration("chrome-idle-close", 20*time.Second, "close a profile's Chrome when no task has used it for this long after the last one (0 = keep it open)")
+	stateAfter := fs.Bool("state-after-upload", true, "after each upload, read the video's state in Studio and report it (task_video_state)")
 	failAt := fs.String("playbook-fail-at", "", "testing: make this playbook step fail once to exercise the LLM hand-over")
 	_ = fs.Parse(args)
 	if *serverURL == "" {
@@ -71,7 +72,7 @@ func runAgent(args []string) error {
 	ctl := &chrome.Controller{Bin: *chromeBin, UserDataDir: absUDD, DebugPort: *debugPort, ExtensionDir: absExt}
 	exec := &studioenv.Executor{
 		Chrome: ctl, Work: absWork, Spec: spec, BMCP: *bmcp, Launcher: self,
-		Runner: *runner, FailAt: *failAt, Logf: logf,
+		Runner: *runner, FailAt: *failAt, Logf: logf, StateAfterUpload: *stateAfter,
 	}
 	a := &agent.Agent{
 		ID: id, Version: agentVersion, Timeout: *timeout, Logf: logf,

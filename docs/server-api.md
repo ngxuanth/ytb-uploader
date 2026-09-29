@@ -178,8 +178,9 @@ curl -XPOST 127.0.0.1:8090/uploads -H 'content-type: application/json' -d '{
 
 ### Trạng thái video trên YouTube
 
-Launcher đọc trạng thái video ngay trong Chrome của profile (danh sách nội dung và trang edit của Studio), bằng script, không dùng LLM. Upload xong thì không đọc; trạng thái chỉ được đọc khi được gọi:
+Launcher đọc trạng thái video ngay trong Chrome của profile (danh sách nội dung và trang edit của Studio), bằng script, không dùng LLM:
 
+- **Ngay sau khi upload:** sau khi Lưu, script đọc trạng thái rồi gửi `task_video_state` trước `task_finish` (`launcher run -state-after-upload=false` để tắt; mỗi video nhanh hơn khoảng 15–25s).
 - **Theo yêu cầu:** `POST /tasks/:id/video/check` xếp một task `check_video` vào hàng đợi của profile. Task này không có file, chỉ đọc Studio.
 - **Tự động (tắt mặc định):** chạy server với `-recheck-processing 10m` thì video còn đang xử lý được tự kiểm tra lại sau khoảng đó, tối đa 6 lần.
 

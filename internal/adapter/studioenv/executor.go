@@ -26,7 +26,9 @@ type Executor struct {
 	Launcher string
 	Runner   string
 	FailAt   string
-	Logf     func(string, ...any)
+	// StateAfterUpload: read the video's state after each upload.
+	StateAfterUpload bool
+	Logf             func(string, ...any)
 }
 
 var (
@@ -78,6 +80,7 @@ func (x *Executor) Execute(ctx context.Context, msg contract.Assign, timeout tim
 		Task:   session.Endpoint{URL: msg.TaskMCP.URL, Token: msg.TaskMCP.Token},
 		Report: session.Endpoint{URL: msg.ReportMCP.URL, Token: msg.ReportMCP.Token},
 		Spec:   x.Spec, BMCP: x.BMCP, Launcher: x.Launcher, FailAt: x.FailAt, Logf: x.Logf,
+		StateAfterUpload: x.StateAfterUpload,
 	}
 	return upload.Run(ctx, upload.Attempt{
 		ID: task.TaskID, SessionDir: sessionDir, Timeout: timeout, Runner: x.Runner, Logf: x.Logf,

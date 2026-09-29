@@ -44,7 +44,10 @@ type Env struct {
 	Cancel     <-chan struct{} // asks the attempt to stop (try -cancel-after)
 	OnCancel   func()
 	FailAt     string // playbook step to fail once, to test the hand-over
-	Logf       func(string, ...any)
+	// StateAfterUpload reads the video's state in Studio after the save and
+	// reports it with task_video_state.
+	StateAfterUpload bool
+	Logf             func(string, ...any)
 
 	client *taskmcp.Client
 }
@@ -91,6 +94,7 @@ func (e *Env) Script(c upload.Claim) upload.Script {
 	}
 	r := e.runner(task, c.TaskID)
 	r.FailAt = e.FailAt
+	r.StateAfterUpload = e.StateAfterUpload
 	return &script{e: e, r: r, task: task}
 }
 

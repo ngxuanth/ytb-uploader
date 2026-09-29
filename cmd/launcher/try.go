@@ -56,6 +56,7 @@ func try(args []string) error {
 	extDir := fs.String("extension", defaultExtensionDir(), "unpacked Browser MCP extension directory")
 	chromeBin := fs.String("chrome-bin", "google-chrome", "Chrome binary")
 	runner := fs.String("runner", upload.RunnerPlaybook, "playbook: script first, LLM only for failed steps; llm: LLM session only")
+	stateAfter := fs.Bool("state-after-upload", true, "after the upload, read the video's state in Studio and report it")
 	failAt := fs.String("playbook-fail-at", "", "testing: make this playbook step fail once to exercise the LLM hand-over")
 	_ = fs.Parse(args)
 
@@ -155,7 +156,7 @@ func try(args []string) error {
 		Report: session.Endpoint{URL: "http://" + reportLn.Addr().String() + "/mcp", Token: be.Token()},
 		Spec:   spec, BMCP: *bmcp, Launcher: self,
 		Idle: *idle, IdleFor: be.IdleFor, Cancel: cancelC, OnCancel: be.RequestStop,
-		FailAt: *failAt, Logf: logf,
+		FailAt: *failAt, Logf: logf, StateAfterUpload: *stateAfter,
 	}
 	sum := upload.Run(ctx, upload.Attempt{
 		ID: sessionID, SessionDir: sessionDir, Runner: *runner, Logf: logf,
