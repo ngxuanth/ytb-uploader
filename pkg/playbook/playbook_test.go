@@ -29,10 +29,15 @@ type fakeStudio struct {
 
 	brokenTitle bool // typing the title leaves the old text, like a lost focus
 	limitText   string
+
+	dialogOpen bool   // the upload dialog is on screen
+	notice     bool   // the "Use of AI" notice covers the dialog
+	drafts     string // video id listed as a draft in the content list
+	closed     int    // notices closed
 }
 
 func newStudio(meta wire.Metadata) *fakeStudio {
-	return &fakeStudio{meta: meta, url: "https://studio.youtube.com/channel/UC0123456789abcdef/videos/upload?d=ud", title: "video"}
+	return &fakeStudio{meta: meta, url: "https://studio.youtube.com/channel/UC0123456789abcdef/videos/upload?d=ud", title: "video", dialogOpen: true}
 }
 
 func (f *fakeStudio) Navigate(_ context.Context, url string) error { f.url = url; return nil }
@@ -62,6 +67,9 @@ func (f *fakeStudio) TypeSelector(_ context.Context, sel, text string, _ bool) e
 }
 
 func (f *fakeStudio) ClickSelector(_ context.Context, sel string) error {
+	if f.notice {
+		return errors.New("click timeout: element covered")
+	}
 	switch {
 	case strings.Contains(sel, "VIDEO_MADE_FOR_KIDS"):
 		f.audience = true
@@ -80,6 +88,23 @@ func (f *fakeStudio) ClickSelector(_ context.Context, sel string) error {
 func (f *fakeStudio) Evaluate(_ context.Context, expr string, out any) error {
 	var v any
 	switch {
+	case strings.Contains(expr, "sử dụng ai"):
+		v = []string{}
+		if f.notice {
+			f.notice = false
+			f.closed++
+			v = []string{"Để tuân thủ chính sách của YouTube, hãy chuyển đến mục Sử dụng AI"}
+		}
+	case strings.Contains(expr, "chỉnh sửa bản nháp"):
+		switch {
+		case f.drafts == "":
+			v = "missing"
+		default:
+			f.dialogOpen = true
+			v = "ok"
+		}
+	case strings.Contains(expr, "ytcp-uploads-dialog #next-button"):
+		v = f.dialogOpen
 	case strings.Contains(expr, "limit:"):
 		v = map[string]any{"link": f.link, "limit": f.limitText != "" && limitRe(expr).MatchString(strings.ToLower(f.limitText))}
 	case strings.Contains(expr, "ytcp-video-upload-progress"):
@@ -92,10 +117,10 @@ func (f *fakeStudio) Evaluate(_ context.Context, expr string, out any) error {
 		v = f.nextClicks >= 3
 	case strings.Contains(expr, "input[type=file]"):
 		v = strings.Contains(f.url, "/videos/upload")
-	case strings.Contains(expr, ".video-url-fadeable a") && strings.Contains(expr, "|| ''"):
-		v = f.link
-	case strings.Contains(expr, ".video-url-fadeable a"):
+	case strings.Contains(expr, "ytcp-uploads-dialog a[href]") && strings.Contains(expr, "return !!"):
 		v = f.link != ""
+	case strings.Contains(expr, "ytcp-uploads-dialog a[href]"):
+		v = f.link
 	case strings.Contains(expr, "#title-textarea"):
 		v = strings.TrimSpace(f.title) == strings.TrimSpace(f.meta.Title)
 	case strings.Contains(expr, "#description-textarea"):
@@ -274,5 +299,48 @@ func TestDailyUploadLimitIsNeedsAttention(t *testing.T) {
 		if res.Outcome != Stopped || rep.last() != (call{"finish", "needs_attention/UPLOAD_LIMIT", ""}) {
 			t.Fatalf("%q: result %+v, last %+v", text, res, rep.last())
 		}
+	}
+}
+
+func TestNoticeOverTheDialogIsClosed(t *testing.T) {
+	f, rep := newStudio(meta), &fakeReporter{}
+	f.notice = true
+	if res := newRunner(meta, rep).Run(context.Background(), f); res.Outcome != Done {
+		t.Fatalf("result %+v", res)
+	}
+	if f.closed != 1 || !f.audience {
+		t.Fatalf("closed=%d audience=%v", f.closed, f.audience)
+	}
+}
+
+func TestExistingVideoReopensItsDraft(t *testing.T) {
+	f, rep := newStudio(meta), &fakeReporter{}
+	f.dialogOpen, f.drafts, f.link = false, "abcdefghijk", "https://youtu.be/abcdefghijk"
+	r := New(Task{ExistingVideoID: "abcdefghijk", ChannelID: "UC0123456789abcdef", VideoPath: "/tmp/v.mp4", Meta: meta}, rep, nil)
+	r.PollEvery, r.StepTimeout, r.Settle = time.Millisecond, 50*time.Millisecond, time.Millisecond
+	res := r.Run(context.Background(), f)
+	if res.Outcome != Done || f.uploads != 0 || !f.saved || !f.dialogOpen {
+		t.Fatalf("result %+v uploads=%d saved=%v", res, f.uploads, f.saved)
+	}
+	if !strings.HasSuffix(f.url, "/videos/upload") || rep.last() != (call{"finish", "done/", "abcdefghijk"}) {
+		t.Fatalf("url %s last %+v", f.url, rep.last())
+	}
+}
+
+func TestClosedDialogIsReopenedOnResume(t *testing.T) {
+	f, rep := newStudio(meta), &fakeReporter{}
+	r := newRunner(meta, rep)
+	r.FailAt = "audience"
+	if res := r.Run(context.Background(), f); res.Outcome != Failed || res.Step.Name != "audience" {
+		t.Fatalf("first: %+v", res)
+	}
+	// The LLM closed the upload dialog instead of fixing the step.
+	f.dialogOpen, f.drafts = false, "abcdefghijk"
+	r.HandedOff("audience")
+	if res := r.Run(context.Background(), f); res.Outcome != Done {
+		t.Fatalf("resume: %+v", res)
+	}
+	if f.uploads != 1 || !f.dialogOpen || !f.audience || !f.saved {
+		t.Fatalf("studio %+v", f)
 	}
 }

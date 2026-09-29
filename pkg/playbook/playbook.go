@@ -39,10 +39,13 @@ type Reporter interface {
 
 // Task is the part of task_claim the script uses.
 type Task struct {
-	ChannelID string // may be empty: the profile's default channel
-	VideoPath string // absolute path Chrome reads the file from
-	ThumbPath string
-	Meta      wire.Metadata
+	// ExistingVideoID is a video an earlier attempt (or the script itself)
+	// already created: the script reopens its draft instead of uploading.
+	ExistingVideoID string
+	ChannelID       string // may be empty: the profile's default channel
+	VideoPath       string // absolute path Chrome reads the file from
+	ThumbPath       string
+	Meta            wire.Metadata
 }
 
 // Step is one stage of the upload dialog.
@@ -125,6 +128,9 @@ func New(task Task, rep Reporter, logf func(string, ...any)) *Runner {
 		PollEvery: time.Second, StepTimeout: 45 * time.Second, UploadTimeout: 30 * time.Minute,
 		Settle: 2 * time.Second,
 	}
+	if task.ExistingVideoID != "" {
+		r.videoID, r.videoURL, r.attached = task.ExistingVideoID, "https://youtu.be/"+task.ExistingVideoID, true
+	}
 	r.steps = r.buildSteps()
 	return r
 }
@@ -160,6 +166,9 @@ func (r *Runner) Run(ctx context.Context, p Page) Result {
 			return r.end(ctx, p, r.steps[r.i], err)
 		}
 	}
+	if err := r.ensureDialog(ctx, p); err != nil {
+		return r.end(ctx, p, r.steps[r.i], err)
+	}
 	for r.i < len(r.steps) {
 		s := r.steps[r.i]
 		if s.skip != nil && s.skip(r) {
@@ -179,6 +188,8 @@ func (r *Runner) Run(ctx context.Context, p Page) Result {
 		if err := r.report(ctx, s.Status, "[playbook] "+s.Name, 0); err != nil {
 			return r.end(ctx, p, s, err)
 		}
+		began := time.Now()
+		r.dismissInterstitials(ctx, p)
 		var err error
 		if r.FailAt == s.Name && !r.injected {
 			r.injected = true
@@ -187,12 +198,16 @@ func (r *Runner) Run(ctx context.Context, p Page) Result {
 			err = s.do(ctx, r, p)
 			if err == nil && s.Check != "" {
 				err = r.waitCheck(ctx, p, s.Check, r.StepTimeout)
+				// A notice that popped up during the step can hide the result.
+				if err != nil && r.dismissInterstitials(ctx, p) > 0 {
+					err = r.waitCheck(ctx, p, s.Check, r.StepTimeout/3)
+				}
 			}
 		}
 		if err != nil {
 			return r.end(ctx, p, s, err)
 		}
-		r.logf("playbook: %s done", s.Name)
+		r.logf("playbook: %s done in %s", s.Name, time.Since(began).Round(100*time.Millisecond))
 		r.next(s)
 	}
 	if err := r.rep.Finish(ctx, "done", "", "", r.videoID); err != nil {
@@ -333,19 +348,25 @@ func (r *Runner) buildSteps() []*Step {
 	const fileInput = `input[type=file]`
 	const titleBox = `#title-textarea #textbox`
 	const descBox = `#description-textarea #textbox`
-	const link = `ytcp-uploads-dialog .video-url-fadeable a`
+	// findLink is a JS expression: the video link shown in the upload
+	// dialog, or ''. Studio does not always put it under
+	// .video-url-fadeable, so any youtu.be / studio video link in the
+	// dialog counts.
+	const findLink = `([...document.querySelectorAll('ytcp-uploads-dialog a[href]')].map(a => a.href).find(h => /youtu\.be\/[\w-]{11}|\/video\/[\w-]{11}/.test(h)) || '')`
 
 	return []*Step{
 		{
 			Name: "open", Status: wire.StatusPreparing,
+			skip:  func(r *Runner) bool { return r.task.ExistingVideoID != "" },
 			Goal:  "YouTube Studio upload page of the right channel is open, with the file picker of the upload dialog (input[type=file]) present",
 			Check: iife(`return !!document.querySelector(` + js(fileInput) + `) && !location.host.startsWith('accounts.');`),
 			do:    doOpen,
 		},
 		{
 			Name: "attach", Status: wire.StatusAttaching,
-			Goal:  "the video file is attached and the upload dialog shows the video link (" + link + ")",
-			Check: iife(`return !!document.querySelector(` + js(link) + `)?.href;`),
+			skip:  func(r *Runner) bool { return r.task.ExistingVideoID != "" },
+			Goal:  "the video file is attached and the upload dialog shows the video link (a https://youtu.be/<id> link inside ytcp-uploads-dialog)",
+			Check: iife(`return !!` + findLink + `;`),
 			do: func(ctx context.Context, r *Runner, p Page) error {
 				if r.attached {
 					// Never attach twice: that would upload a second video.
@@ -362,7 +383,7 @@ func (r *Runner) buildSteps() []*Step {
 						Limit bool   `json:"limit"`
 					}
 					_ = p.Evaluate(ctx, iife(`const t = (document.querySelector('ytcp-uploads-dialog')?.innerText || '').toLowerCase();
-return {link: document.querySelector(`+js(link)+`)?.href || '', limit: /daily upload limit|upload limit reached|giới hạn tải (video )?lên hằng ngày|đã đạt (đến )?giới hạn/.test(t)};`), &st)
+return {link: `+findLink+`, limit: /daily upload limit|upload limit reached|giới hạn tải (video )?lên hằng ngày|đã đạt (đến )?giới hạn/.test(t)};`), &st)
 					if st.Link != "" {
 						return nil
 					}
@@ -379,9 +400,10 @@ return {link: document.querySelector(`+js(link)+`)?.href || '', limit: /daily up
 		{
 			// Reads the link and reports it; nothing on the page changes.
 			Name: "video_link",
+			skip: func(r *Runner) bool { return r.task.ExistingVideoID != "" },
 			do: func(ctx context.Context, r *Runner, p Page) error {
 				var href string
-				if err := p.Evaluate(ctx, iife(`return document.querySelector(`+js(link)+`)?.href || '';`), &href); err != nil {
+				if err := p.Evaluate(ctx, iife(`return `+findLink+`;`), &href); err != nil {
 					return err
 				}
 				mm := videoInLink.FindStringSubmatch(href)
@@ -399,6 +421,14 @@ return {link: document.querySelector(`+js(link)+`)?.href || '', limit: /daily up
 				}
 				return nil
 			},
+		},
+		{
+			// Only for a video that already exists: reopen its draft.
+			Name: "draft", Status: wire.StatusPreparing,
+			Goal:  "the upload dialog of the existing video is open again (from the channel's content list, \"Edit draft\")",
+			Check: dialogOpenJS,
+			skip:  func(r *Runner) bool { return r.task.ExistingVideoID == "" },
+			do:    func(ctx context.Context, r *Runner, p Page) error { return r.reopenDraft(ctx, p) },
 		},
 		{
 			Name: "title", Status: wire.StatusFillingMetadata,
@@ -506,6 +536,145 @@ return !vis(document.querySelector('#done-button')) && !vis(document.querySelect
 				return nil
 			},
 		},
+	}
+}
+
+// interstitialJS closes notices Studio pops up over the upload dialog, such
+// as "to follow YouTube policy, go to 'Use of AI'…". It only clicks a close
+// button whose surrounding block has a known notice text and does not hold
+// the dialog's own controls, so it can never close the upload dialog.
+const interstitialJS = `(() => { ` + vis + `
+const notice = /sử dụng ai|use of ai|altered or synthetic|nội dung (bị )?(thay đổi|chỉnh sửa) hoặc (tổng hợp|tạo)/i;
+const close = /^(đóng|close|bỏ qua|dismiss|got it|đã hiểu|ok)$/i;
+const closed = [];
+for (const b of document.querySelectorAll('button, ytcp-button, tp-yt-paper-icon-button, ytcp-icon-button, [role=button]')) {
+  if (!vis(b)) continue;
+  const label = ((b.innerText || '').trim() || b.getAttribute('aria-label') || '').trim();
+  if (!close.test(label)) continue;
+  let a = b.parentElement;
+  for (let i = 0; i < 8 && a; i++, a = a.parentElement) {
+    if (a.querySelector('#title-textarea, #next-button, #privacy-radios, #done-button')) { a = null; break; }
+    if (notice.test(a.innerText || '')) break;
+  }
+  if (a && notice.test(a.innerText || '')) { closed.push((a.innerText || '').trim().slice(0, 100)); b.click(); }
+}
+return closed; })()`
+
+// dismissInterstitials closes known notices and returns how many it closed.
+func (r *Runner) dismissInterstitials(ctx context.Context, p Page) int {
+	var closed []string
+	if err := p.Evaluate(ctx, interstitialJS, &closed); err != nil || len(closed) == 0 {
+		return 0
+	}
+	for _, c := range closed {
+		r.logf("playbook: closed a notice: %q", c)
+	}
+	_ = sleep(ctx, r.Settle/2)
+	return len(closed)
+}
+
+const dialogOpenJS = `(() => { ` + vis + ` return vis(document.querySelector('ytcp-uploads-dialog #title-textarea #textbox')) || vis(document.querySelector('#privacy-radios')) || vis(document.querySelector('ytcp-uploads-dialog #next-button')); })()`
+
+// ensureDialog runs before a resumed Run: when the video exists but its
+// upload dialog is gone (an LLM closed it, the tab reloaded), the draft is
+// reopened and the details steps are checked again from the title on.
+func (r *Runner) ensureDialog(ctx context.Context, p Page) error {
+	title, publish := r.index("title"), r.index("publish")
+	if r.videoID == "" || r.i < title || r.i >= publish {
+		return nil
+	}
+	if ok, _ := r.check(ctx, p, dialogOpenJS); ok {
+		return nil
+	}
+	r.logf("playbook: upload dialog is gone; reopening the draft of %s", r.videoID)
+	if err := r.reopenDraft(ctx, p); err != nil {
+		return err
+	}
+	r.i = title
+	return nil
+}
+
+func (r *Runner) index(name string) int {
+	for i, s := range r.steps {
+		if s.Name == name {
+			return i
+		}
+	}
+	return len(r.steps)
+}
+
+// reopenDraft opens the upload dialog of r.videoID again from the channel's
+// content list ("Edit draft"), the way a person continues a draft.
+func (r *Runner) reopenDraft(ctx context.Context, p Page) error {
+	channel, err := resolveChannel(ctx, r, p)
+	if err != nil {
+		return err
+	}
+	if err := p.Navigate(ctx, "https://studio.youtube.com/channel/"+channel+"/videos/upload"); err != nil {
+		return err
+	}
+	find := iife(`const a = document.querySelector('a[href*="/video/` + r.videoID + `/"], a[href*="youtu.be/` + r.videoID + `"]');
+if (!a) return 'missing';
+const row = a.closest('ytcp-video-row, [role=row], tr') || a.parentElement;
+const b = [...row.querySelectorAll('ytcp-button, button, a, [role=button]')].find(b => /chỉnh sửa bản nháp|edit draft/i.test((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')));
+if (!b) return 'not a draft';
+b.click(); return 'ok';`)
+	deadline := time.Now().Add(r.StepTimeout)
+	for {
+		var got string
+		_ = p.Evaluate(ctx, find, &got)
+		switch got {
+		case "ok":
+			if err := r.waitCheck(ctx, p, dialogOpenJS, r.StepTimeout); err != nil {
+				return fmt.Errorf("draft %s: dialog did not open: %w", r.videoID, err)
+			}
+			return nil
+		case "not a draft":
+			return fmt.Errorf("video %s is not a draft any more; it needs its edit page", r.videoID)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("video %s is not in the channel's content list", r.videoID)
+		}
+		if err := sleep(ctx, r.PollEvery); err != nil {
+			return err
+		}
+	}
+}
+
+// resolveChannel is the task's channel, or the profile's default one read
+// from the URL Studio redirects to.
+func resolveChannel(ctx context.Context, r *Runner, p Page) (string, error) {
+	u, err := p.URL(ctx)
+	if err != nil {
+		return "", err
+	}
+	if strings.Contains(u, "accounts.google.com") {
+		return "", &terminal{"LOGIN_REQUIRED", "the profile is logged out of Google"}
+	}
+	if r.task.ChannelID != "" {
+		return r.task.ChannelID, nil
+	}
+	if mm := channelInURL.FindStringSubmatch(u); mm != nil {
+		return mm[1], nil
+	}
+	if err := p.Navigate(ctx, "https://studio.youtube.com"); err != nil {
+		return "", err
+	}
+	deadline := time.Now().Add(r.StepTimeout)
+	for {
+		u, _ = p.URL(ctx)
+		if strings.Contains(u, "accounts.google.com") {
+			return "", &terminal{"LOGIN_REQUIRED", "the profile is logged out of Google"}
+		}
+		if mm := channelInURL.FindStringSubmatch(u); mm != nil {
+			return mm[1], nil
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("Studio did not open a channel (at %s)", u)
+		}
+		if err := sleep(ctx, r.PollEvery); err != nil {
+			return "", err
+		}
 	}
 }
 

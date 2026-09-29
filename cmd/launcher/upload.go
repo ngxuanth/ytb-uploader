@@ -90,17 +90,18 @@ func runUpload(ctx context.Context, u uploadRun) uploadSummary {
 	case claim.Control == taskmcp.Stop || claim.TaskID == "":
 		logf("task %s: nothing to do (%s)", u.ID, claim.Message)
 		return sum
-	case claim.Kind != taskmcp.KindUpload || claim.Metadata == nil || claim.ExistingVideoID != "":
-		// Deleting videos and finishing an existing video are LLM work.
+	case claim.Kind != taskmcp.KindUpload || claim.Metadata == nil:
+		// Deleting videos is LLM work.
 		sum.Runner = runnerLLM
 		sum.Out, sum.Err = u.llm(ctx, u.SessionDir, prompt.Upload, nil, remaining(), 0)
 		return sum
 	}
 
 	task := playbook.Task{
-		ChannelID: claim.ChannelID,
-		VideoPath: filepath.Join(u.UploadDir, claim.FilePath),
-		Meta:      *claim.Metadata,
+		ExistingVideoID: claim.ExistingVideoID,
+		ChannelID:       claim.ChannelID,
+		VideoPath:       filepath.Join(u.UploadDir, claim.FilePath),
+		Meta:            *claim.Metadata,
 	}
 	if claim.ThumbnailPath != "" {
 		task.ThumbPath = filepath.Join(u.UploadDir, claim.ThumbnailPath)
@@ -124,7 +125,9 @@ func runUpload(ctx context.Context, u uploadRun) uploadSummary {
 		if res.Step != nil {
 			stepName = res.Step.Name
 		}
-		sum.FailedSteps = append(sum.FailedSteps, stepName)
+		if n := len(sum.FailedSteps); n == 0 || sum.FailedSteps[n-1] != stepName {
+			sum.FailedSteps = append(sum.FailedSteps, stepName)
+		}
 		sum.Runner = runnerMixed
 		sc := prompt.StepContext{
 			TaskID: claim.TaskID, Step: stepName, URL: res.URL, VideoID: r.VideoID(),
