@@ -150,7 +150,30 @@ func (c *Controller) start(profileDir, url string) error {
 		return fmt.Errorf("start chrome: %w", err)
 	}
 	go func() { _ = cmd.Wait() }()
+	// The next attempt on this profile reuses this Chrome (see Isolated).
+	_ = os.WriteFile(filepath.Join(c.UserDataDir, debugPortFile), []byte(strconv.Itoa(c.DebugPort)), 0o600)
 	return nil
+}
+
+// debugPortFile records, in a user-data-dir, the debugging port its Chrome
+// was started with.
+const debugPortFile = ".debug-port"
+
+// runningDebugPort is the debugging port of the Chrome already running on
+// this user-data-dir, or 0 if none answers.
+func (c *Controller) runningDebugPort(ctx context.Context) int {
+	b, err := os.ReadFile(filepath.Join(c.UserDataDir, debugPortFile))
+	if err != nil {
+		return 0
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || port <= 0 || len(c.chromePIDs()) == 0 {
+		return 0
+	}
+	if _, err := cdp.BrowserWSURL(ctx, port); err != nil {
+		return 0
+	}
+	return port
 }
 
 func (c *Controller) waitDebug(ctx context.Context, d time.Duration) error {
@@ -356,6 +379,11 @@ func (c *Controller) Setup(ctx context.Context, profileDir string, port int, url
 		}
 		res.Installed = true
 		session, extID, err = c.waitWorker(ctx, conn, cid, 15*time.Second)
+		if errors.Is(err, errNoWorker) && r.ID != "" {
+			// A new profile may not start the worker until an event.
+			extID = r.ID
+			session, err = c.wakeWorker(ctx, conn, cid, extID)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("extension loaded (%s) but its worker did not start in this profile: %w", r.ID, err)
 		}
@@ -374,6 +402,9 @@ func (c *Controller) Setup(ctx context.Context, profileDir string, port int, url
 await chrome.storage.local.set({wsPort:%d});
 const t=await chrome.tabs.create({url:%q,active:true});
 await chrome.storage.local.set({selectedTabId:t.id});
+for (const o of await chrome.tabs.query({})) {
+  if (o.id!==t.id && /^(https:\/\/studio\.youtube\.com\/|about:blank|chrome:\/\/newtab)/.test(o.url||o.pendingUrl||"")) { try { await chrome.tabs.remove(o.id) } catch {} }
+}
 return {tabId:t.id};})()`, port, url)
 	if err := conn.Eval(ctx, session, expr, &tab); err != nil {
 		return nil, fmt.Errorf("configure extension: %w", err)
@@ -390,6 +421,11 @@ return {tabId:t.id};})()`, port, url)
 	if stale {
 		_ = conn.Eval(ctx, session, fmt.Sprintf("chrome.storage.local.set({codeHash:%q}).then(()=>true)", hash), nil)
 	}
+	// An extension this call just loaded runs the current code already;
+	// reloading it right away can leave a new profile without a worker.
+	if res.Installed {
+		stale = false
+	}
 	if stale || !c.usesPort(ctx, conn, session, port, 5*time.Second) {
 		_ = conn.Eval(ctx, session, "setTimeout(()=>chrome.runtime.reload(),50),true", nil)
 		conn.Detach(ctx, session)
@@ -397,6 +433,11 @@ return {tabId:t.id};})()`, port, url)
 			return nil, err
 		}
 		session, _, err = c.waitWorker(ctx, conn, cid, 15*time.Second)
+		if errors.Is(err, errNoWorker) {
+			// An MV3 worker only starts on an event: open one of the
+			// extension's pages to wake it, then look again.
+			session, err = c.wakeWorker(ctx, conn, cid, extID)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("extension did not come back after reload: %w", err)
 		}
@@ -410,6 +451,22 @@ return {tabId:t.id};})()`, port, url)
 	}
 	res.Message = fmt.Sprintf("extension points at port %d and drives tab %d", port, tab.TabID)
 	return res, nil
+}
+
+// wakeWorker opens the extension's popup page in the profile, which starts
+// its service worker, waits for the worker and closes the page again.
+func (c *Controller) wakeWorker(ctx context.Context, conn *cdp.Conn, cid, extID string) (string, error) {
+	var t struct {
+		TargetID string `json:"targetId"`
+	}
+	if err := conn.Call(ctx, "", "Target.createTarget", map[string]any{
+		"url": "chrome-extension://" + extID + "/popup.html", "browserContextId": cid, "background": true,
+	}, &t); err != nil {
+		return "", err
+	}
+	defer func() { _ = conn.Call(ctx, "", "Target.closeTarget", map[string]any{"targetId": t.TargetID}, nil) }()
+	session, _, err := c.waitWorker(ctx, conn, cid, 10*time.Second)
+	return session, err
 }
 
 // usesPort waits until the extension's connect loop targets port.

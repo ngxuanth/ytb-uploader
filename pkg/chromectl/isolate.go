@@ -42,6 +42,11 @@ func (c *Controller) Isolated(ctx context.Context, profile string, port int) (*C
 	next := *c
 	next.UserDataDir = dir
 	next.DebugPort = port
+	// Keep this profile's Chrome between tasks: reopening it and its
+	// extension costs more than the rest of an upload.
+	if running := next.runningDebugPort(ctx); running > 0 {
+		next.DebugPort = running
+	}
 	return &next, nil
 }
 

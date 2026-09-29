@@ -38,6 +38,8 @@ type fakeStudio struct {
 	stuck      bool   // the upload never gets past a fixed percent
 	domNext    bool   // DOM clicks on Next are ignored (only real clicks work)
 	realNext   int    // real (CDP) clicks on Next
+	domIgnore  bool   // DOM clicks on radios and Save do nothing
+	realClicks int    // real (CDP) clicks on radios and Save
 }
 
 func newStudio(meta wire.Metadata) *fakeStudio {
@@ -74,6 +76,9 @@ func (f *fakeStudio) ClickSelector(_ context.Context, sel string) error {
 	if f.notice {
 		return errors.New("click timeout: element covered")
 	}
+	if sel != "#next-button" {
+		f.realClicks++
+	}
 	switch {
 	case strings.Contains(sel, "VIDEO_MADE_FOR_KIDS"):
 		f.audience = true
@@ -93,6 +98,20 @@ func (f *fakeStudio) ClickSelector(_ context.Context, sel string) error {
 func (f *fakeStudio) Evaluate(_ context.Context, expr string, out any) error {
 	var v any
 	switch {
+	case strings.Contains(expr, "e.click(); return true"):
+		if !f.domIgnore {
+			switch {
+			case strings.Contains(expr, "VIDEO_MADE_FOR_KIDS"):
+				f.audience = true
+			case strings.Contains(expr, `name=\"PRIVATE\"`), strings.Contains(expr, `name=\"PUBLIC\"`), strings.Contains(expr, `name=\"UNLISTED\"`):
+				if f.nextClicks >= 3 {
+					f.visibility = "dom"
+				}
+			case strings.Contains(expr, "#done-button"):
+				f.saved = true
+			}
+		}
+		v = true
 	case strings.Contains(expr, "b.click(); return true"):
 		if !f.domNext {
 			f.nextClicks++
@@ -383,5 +402,23 @@ func TestStalledUploadIsFatal(t *testing.T) {
 	res := r.Run(context.Background(), f)
 	if res.Outcome != Failed || !res.Fatal || res.Step.Name != "wait_upload" || !strings.Contains(res.Err.Error(), "no progress") {
 		t.Fatalf("stall: %+v", res)
+	}
+}
+
+func TestRadiosAndSaveUseDOMClicksWithRealFallback(t *testing.T) {
+	f, rep := newStudio(meta), &fakeReporter{}
+	if res := newRunner(meta, rep).Run(context.Background(), f); res.Outcome != Done {
+		t.Fatalf("dom: %+v", res)
+	}
+	if f.realClicks != 0 || !f.audience || f.visibility == "" || !f.saved {
+		t.Fatalf("dom: real=%d studio=%+v", f.realClicks, f)
+	}
+	f, rep = newStudio(meta), &fakeReporter{}
+	f.domIgnore = true
+	if res := newRunner(meta, rep).Run(context.Background(), f); res.Outcome != Done {
+		t.Fatalf("fallback: %+v", res)
+	}
+	if f.realClicks != 3 || !f.audience || !f.saved {
+		t.Fatalf("fallback: real=%d studio=%+v", f.realClicks, f)
 	}
 }

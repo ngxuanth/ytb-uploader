@@ -484,10 +484,7 @@ return {link: `+findLink+`, limit: /daily upload limit|upload limit reached|gi�
 			Goal:  "the audience radio " + radio(kids) + " is selected (aria-checked=\"true\")",
 			Check: checked(radio(kids)),
 			do: func(ctx context.Context, r *Runner, p Page) error {
-				if err := p.Scroll(ctx, radio(kids)); err != nil {
-					return err
-				}
-				return p.ClickSelector(ctx, radio(kids))
+				return r.click(ctx, p, radio(kids), checked(radio(kids)))
 			},
 		},
 		{
@@ -502,10 +499,7 @@ return {link: `+findLink+`, limit: /daily upload limit|upload limit reached|gi�
 			Check:       checked(radio(visibility)),
 			Unsupported: m.ScheduleAt != nil,
 			do: func(ctx context.Context, r *Runner, p Page) error {
-				if err := p.Scroll(ctx, radio(visibility)); err != nil {
-					return err
-				}
-				return p.ClickSelector(ctx, radio(visibility))
+				return r.click(ctx, p, radio(visibility), checked(radio(visibility)))
 			},
 		},
 		{
@@ -516,12 +510,14 @@ return {link: `+findLink+`, limit: /daily upload limit|upload limit reached|gi�
 		},
 		{
 			Name: "publish", Status: wire.StatusPublishing,
-			Goal: "Save/Publish (#done-button) was pressed and Studio confirmed it: the upload dialog closed (or the share dialog shows)",
-			Check: iife(`if (vis(document.querySelector('ytcp-video-share-dialog'))) return true;
-return !vis(document.querySelector('#done-button')) && !vis(document.querySelector('#privacy-radios')) && location.host === 'studio.youtube.com';`),
+			Goal:  "Save/Publish (#done-button) was pressed and Studio confirmed it: the upload dialog closed, or a confirmation shows (\"Video processing\" / share dialog; close it)",
+			Check: publishedJS,
 			do: func(ctx context.Context, r *Runner, p Page) error {
-				if err := p.ClickSelector(ctx, "#done-button"); err != nil {
+				if err := r.click(ctx, p, "#done-button", publishedJS); err != nil {
 					return err
+				}
+				if ok, _ := r.check(ctx, p, publishedJS); ok {
+					return nil
 				}
 				// "Publish anyway" when Studio is still checking the video.
 				if err := sleep(ctx, r.Settle); err != nil {
@@ -713,7 +709,12 @@ func doOpen(ctx context.Context, r *Runner, p Page) error {
 	}
 	if !strings.Contains(u, "/channel/"+channel+"/videos/upload") {
 		if err := p.Navigate(ctx, uploadURL(channel)); err != nil {
-			return err
+			// Studio can keep a tab "loading" long after the page is
+			// usable; the step's check decides whether it really failed.
+			if now, _ := p.URL(ctx); !strings.Contains(now, "/videos/upload") {
+				return err
+			}
+			r.logf("playbook: navigate: %v, but the upload page is open; going on", err)
 		}
 	}
 	u, _ = p.URL(ctx)
@@ -836,4 +837,32 @@ func (r *Runner) waitPage(ctx context.Context, p Page, before string) bool {
 		}
 	}
 	return false
+}
+
+// publishedJS holds once Studio confirmed the save: the share dialog, the
+// "video processing" notice, or the upload dialog gone.
+var publishedJS = iife(`if (vis(document.querySelector('ytcp-video-share-dialog'))) return true;
+if ([...document.querySelectorAll('tp-yt-paper-dialog, ytcp-dialog, [role=dialog]')].some(d => vis(d) && /video processing|still processing|đang xử lý video|vẫn đang được xử lý|video published|video đã được xuất bản|video đã được lưu/i.test(d.innerText || ''))) return true;
+return !vis(document.querySelector('#done-button')) && !vis(document.querySelector('#privacy-radios')) && location.host === 'studio.youtube.com';`)
+
+// clickJS is a DOM click on the element, centred first: no animated mouse
+// move, which makes a real click through the extension take seconds.
+func clickJS(sel string) string {
+	return iife(`const e = document.querySelector(` + js(sel) + `); if (!e) return false; e.scrollIntoView({block: 'center'}); e.click(); return true;`)
+}
+
+// click presses sel with a DOM click and checks the result; if the page did
+// not react (Studio can ignore synthetic clicks), it does a real click.
+func (r *Runner) click(ctx context.Context, p Page, sel, check string) error {
+	var ok bool
+	if err := p.Evaluate(ctx, clickJS(sel), &ok); err == nil && ok {
+		if check == "" || r.waitCheck(ctx, p, check, r.Settle) == nil {
+			return nil
+		}
+		r.logf("playbook: DOM click on %s had no effect; clicking for real", sel)
+	}
+	if err := p.Scroll(ctx, sel); err != nil {
+		return err
+	}
+	return p.ClickSelector(ctx, sel)
 }
