@@ -153,7 +153,7 @@ func try(args []string) error {
 		Task:   session.Endpoint{URL: "http://" + taskLn.Addr().String() + "/mcp", Token: be.token},
 		Report: session.Endpoint{URL: "http://" + reportLn.Addr().String() + "/mcp", Token: be.token},
 		Spec:   spec, BMCP: *bmcp, Launcher: self,
-		Timeout: *timeout, Idle: *idle, IdleFor: be.idleFor,
+		Timeout: max(*timeout, wire.UploadBudget(fileSize(*video))), Idle: *idle, IdleFor: be.idleFor,
 		Cancel: cancelC, OnCancel: be.requestStop,
 		Runner: *runner, FailAt: *failAt,
 	})
@@ -409,4 +409,12 @@ func defaultExtensionDir() string {
 
 func defaultBMCP() string {
 	return filepath.Join(resourceDir(), "bmcp", "dist", "index.js")
+}
+
+func fileSize(path string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
 }

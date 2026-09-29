@@ -270,7 +270,8 @@ func (a *agent) execute(ctx context.Context, cancel context.CancelFunc, msg wire
 	defer cancel()
 	defer a.release(msg.Task.ProfileDirectory, msg.Task.TaskID)
 	task := msg.Task
-	timeout := a.timeout
+	// A big file needs longer than the default session timeout.
+	timeout := max(a.timeout, wire.UploadBudget(task.FileSize))
 	if !task.Deadline.IsZero() {
 		if d := time.Until(task.Deadline); d < timeout {
 			timeout = d

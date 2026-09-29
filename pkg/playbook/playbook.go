@@ -44,6 +44,7 @@ type Task struct {
 	ExistingVideoID string
 	ChannelID       string // may be empty: the profile's default channel
 	VideoPath       string // absolute path Chrome reads the file from
+	VideoSize       int64  // bytes; sizes the wait for the upload
 	ThumbPath       string
 	Meta            wire.Metadata
 }
@@ -114,9 +115,12 @@ type Runner struct {
 	PollEvery     time.Duration
 	StepTimeout   time.Duration
 	UploadTimeout time.Duration
-	// Settle is the pause after clicks that start an animation (Next,
-	// Save) or an upload (thumbnail).
+	// Settle is the pause after clicks that start an animation (Save) or
+	// an upload (thumbnail), and bounds the wait for a Next page change.
 	Settle time.Duration
+	// StallTimeout ends the upload wait when the progress label has not
+	// changed for this long.
+	StallTimeout time.Duration
 }
 
 func New(task Task, rep Reporter, logf func(string, ...any)) *Runner {
@@ -126,7 +130,7 @@ func New(task Task, rep Reporter, logf func(string, ...any)) *Runner {
 	r := &Runner{
 		task: task, rep: rep, logf: logf, handedOff: map[string]bool{},
 		PollEvery: time.Second, StepTimeout: 45 * time.Second, UploadTimeout: 30 * time.Minute,
-		Settle: 2 * time.Second,
+		Settle: 2 * time.Second, StallTimeout: 10 * time.Minute,
 	}
 	if task.ExistingVideoID != "" {
 		r.videoID, r.videoURL, r.attached = task.ExistingVideoID, "https://youtu.be/"+task.ExistingVideoID, true
@@ -157,6 +161,12 @@ type terminal struct{ code, reason string }
 func (t *terminal) Error() string { return t.code + ": " + t.reason }
 
 var errStop = errors.New("server answered control stop")
+
+// fatal marks an error an LLM cannot fix by redoing the step (a stuck
+// network, say); the LLM then finishes the task instead.
+type fatal struct{ error }
+
+func (f fatal) Unwrap() error { return f.error }
 
 // Run resumes at the current step and goes on until the video is saved, a
 // known end is reached, or a step fails.
@@ -235,6 +245,10 @@ func (r *Runner) end(ctx context.Context, p Page, s *Step, err error) Result {
 		return Result{Outcome: Stopped, Step: s, Err: err}
 	case ctx.Err() != nil:
 		return Result{Outcome: Failed, Step: s, Err: ctx.Err(), Fatal: true}
+	}
+	var f fatal
+	if errors.As(err, &f) {
+		return r.fail(ctx, p, s, err, true)
 	}
 	return r.fail(ctx, p, s, err, s.Check == "" || r.handedOff[s.Name])
 }
@@ -480,22 +494,7 @@ return {link: `+findLink+`, limit: /daily upload limit|upload limit reached|gi�
 			Name:  "next",
 			Goal:  "the dialog is on its Visibility step (#privacy-radios is visible); press Next (#next-button) until then",
 			Check: iife(`return vis(document.querySelector('#privacy-radios'));`),
-			do: func(ctx context.Context, r *Runner, p Page) error {
-				for range 4 {
-					var there bool
-					_ = p.Evaluate(ctx, iife(`return vis(document.querySelector('#privacy-radios'));`), &there)
-					if there {
-						return nil
-					}
-					if err := p.ClickSelector(ctx, "#next-button"); err != nil {
-						return err
-					}
-					if err := sleep(ctx, r.Settle); err != nil {
-						return err
-					}
-				}
-				return nil
-			},
+			do:    doNext,
 		},
 		{
 			Name:        "visibility",
@@ -729,9 +728,11 @@ func doOpen(ctx context.Context, r *Runner, p Page) error {
 
 func doWaitUpload(ctx context.Context, r *Runner, p Page) error {
 	const done = `const b = document.querySelector('#done-button'); return vis(b) && !b.hasAttribute('disabled') && b.getAttribute('aria-disabled') !== 'true';`
-	deadline := time.Now().Add(r.UploadTimeout)
+	budget := max(r.UploadTimeout, wire.UploadBudget(r.task.VideoSize))
+	deadline := time.Now().Add(budget)
 	last := -1
 	var lastReport time.Time
+	lastLabel, lastChange := "", time.Now()
 	for {
 		var st struct {
 			Done  bool   `json:"done"`
@@ -749,6 +750,11 @@ return {done: d, label: (l?.innerText || '').trim()};`), &st)
 		if low := strings.ToLower(st.Label); strings.Contains(low, "xử lý") || strings.Contains(low, "process") || strings.Contains(low, "kiểm tra") || strings.Contains(low, "check") {
 			status = wire.StatusProcessing
 		}
+		if st.Label != lastLabel {
+			lastLabel, lastChange = st.Label, time.Now()
+		} else if r.StallTimeout > 0 && time.Since(lastChange) > r.StallTimeout {
+			return fatal{fmt.Errorf("upload made no progress for %s (%q)", r.StallTimeout, st.Label)}
+		}
 		if pct != last || time.Since(lastReport) > 20*time.Second {
 			last, lastReport = pct, time.Now()
 			r.reported = "" // always send progress
@@ -757,10 +763,77 @@ return {done: d, label: (l?.innerText || '').trim()};`), &st)
 			}
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("upload not finished after %s (%s)", r.UploadTimeout, st.Label)
+			return fatal{fmt.Errorf("upload not finished after %s (%s)", budget, st.Label)}
 		}
 		if err := sleep(ctx, 5*r.PollEvery); err != nil {
 			return err
 		}
 	}
+}
+
+// stepSigJS tells which page of the upload dialog is showing, as far as the
+// DOM says. It is empty when Studio's markup has none of these; doNext then
+// falls back to a fixed pause.
+const stepSigJS = `(() => { ` + vis + `
+const d = document.querySelector('ytcp-uploads-dialog'); if (!d) return '';
+const pages = [...d.querySelectorAll('ytcp-uploads-details, ytcp-uploads-video-elements, ytcp-uploads-checks, ytcp-uploads-review')].filter(vis).map(e => e.tagName.toLowerCase());
+const marks = [...d.querySelectorAll('[aria-selected="true"], [aria-current="step"], [active]')].filter(vis).map(e => (e.id || e.tagName.toLowerCase()) + ':' + (e.innerText || '').trim().slice(0, 20));
+return pages.concat(marks).join('|'); })()`
+
+const privacyJS = `(() => { ` + vis + ` return vis(document.querySelector('#privacy-radios')); })()`
+
+// nextJS presses Next with a DOM click, which skips the extension's
+// animated mouse move (about a second per click).
+const nextJS = `(() => { const b = document.querySelector('#next-button');
+if (!b || b.hasAttribute('disabled') || b.getAttribute('aria-disabled') === 'true') return false;
+b.click(); return true; })()`
+
+// doNext presses Next until the Visibility page shows, waiting for each page
+// change instead of a fixed pause.
+func doNext(ctx context.Context, r *Runner, p Page) error {
+	for range 5 {
+		if ok, _ := r.check(ctx, p, privacyJS); ok {
+			return nil
+		}
+		var before string
+		_ = p.Evaluate(ctx, stepSigJS, &before)
+		r.logf("playbook: next: on page %q", before)
+		var pressed bool
+		_ = p.Evaluate(ctx, nextJS, &pressed)
+		if pressed && r.waitPage(ctx, p, before) {
+			continue
+		}
+		// The DOM click was refused or did nothing: a real click.
+		if err := p.ClickSelector(ctx, "#next-button"); err != nil {
+			return err
+		}
+		if !r.waitPage(ctx, p, before) && before == "" {
+			// No page signature to watch: give the animation time.
+			if err := sleep(ctx, r.Settle); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// waitPage waits up to 2*Settle for the dialog to leave the page whose
+// signature is before, or to reach Visibility.
+func (r *Runner) waitPage(ctx context.Context, p Page, before string) bool {
+	poll := min(250*time.Millisecond, r.PollEvery)
+	deadline := time.Now().Add(2 * r.Settle)
+	for time.Now().Before(deadline) {
+		if ok, _ := r.check(ctx, p, privacyJS); ok {
+			return true
+		}
+		var now string
+		_ = p.Evaluate(ctx, stepSigJS, &now)
+		if before != "" && now != "" && now != before {
+			return true
+		}
+		if sleep(ctx, poll) != nil {
+			return false
+		}
+	}
+	return false
 }

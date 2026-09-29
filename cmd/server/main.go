@@ -219,10 +219,14 @@ func (st *state) newJob(in uploadIn) (*job, error) {
 	if err != nil {
 		return nil, err
 	}
+	fi, err := os.Stat(in.Video)
+	if err != nil {
+		return nil, err
+	}
 	ext := filepath.Ext(in.Video)
 	now := time.Now()
 	j := &job{
-		Token: randHex(18), Sum: sum, Ext: ext,
+		Token: randHex(18), Sum: sum, Ext: ext, Size: fi.Size(),
 		VideoPath: in.Video, VideoName: "video" + ext,
 		Claim: &taskmcp.ClaimOut{
 			Control: taskmcp.Continue, Kind: taskmcp.KindUpload,
@@ -419,7 +423,9 @@ func (st *state) assign(j *job) wire.Assign {
 		FileURL:          st.base + "/files/" + j.Claim.TaskID + "/" + j.VideoName,
 		SHA256:           j.Sum, FileExt: j.Ext,
 		ExistingVideoID: j.Claim.ExistingVideoID,
-		Deadline:        time.Now().Add(45 * time.Minute),
+		FileSize:        j.Size,
+		// Big files get longer: the deadline grows with the upload.
+		Deadline: time.Now().Add(max(45*time.Minute, wire.UploadBudget(j.Size))),
 	}
 	if j.ThumbName != "" {
 		task.ThumbnailURL = st.base + "/files/" + j.Claim.TaskID + "/" + j.ThumbName

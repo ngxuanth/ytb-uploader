@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -34,6 +35,9 @@ type fakeStudio struct {
 	notice     bool   // the "Use of AI" notice covers the dialog
 	drafts     string // video id listed as a draft in the content list
 	closed     int    // notices closed
+	stuck      bool   // the upload never gets past a fixed percent
+	domNext    bool   // DOM clicks on Next are ignored (only real clicks work)
+	realNext   int    // real (CDP) clicks on Next
 }
 
 func newStudio(meta wire.Metadata) *fakeStudio {
@@ -75,6 +79,7 @@ func (f *fakeStudio) ClickSelector(_ context.Context, sel string) error {
 		f.audience = true
 	case sel == "#next-button":
 		f.nextClicks++
+		f.realNext++
 	case strings.Contains(sel, `name="PRIVATE"`), strings.Contains(sel, `name="PUBLIC"`), strings.Contains(sel, `name="UNLISTED"`):
 		if f.nextClicks >= 3 {
 			f.visibility = sel
@@ -88,6 +93,13 @@ func (f *fakeStudio) ClickSelector(_ context.Context, sel string) error {
 func (f *fakeStudio) Evaluate(_ context.Context, expr string, out any) error {
 	var v any
 	switch {
+	case strings.Contains(expr, "b.click(); return true"):
+		if !f.domNext {
+			f.nextClicks++
+		}
+		v = true
+	case strings.Contains(expr, "ytcp-uploads-review"):
+		v = fmt.Sprintf("page-%d", min(f.nextClicks, 3))
 	case strings.Contains(expr, "sử dụng ai"):
 		v = []string{}
 		if f.notice {
@@ -108,13 +120,13 @@ func (f *fakeStudio) Evaluate(_ context.Context, expr string, out any) error {
 	case strings.Contains(expr, "limit:"):
 		v = map[string]any{"link": f.link, "limit": f.limitText != "" && limitRe(expr).MatchString(strings.ToLower(f.limitText))}
 	case strings.Contains(expr, "ytcp-video-upload-progress"):
-		v = map[string]any{"done": true, "label": "Đã tải lên 100%"}
+		v = map[string]any{"done": !f.stuck, "label": "Đang tải lên 37%"}
 	case strings.Contains(expr, "ytcp-video-share-dialog"):
 		v = f.saved
 	case strings.Contains(expr, "ytcp-prechecks-warning-dialog"):
 		v = false
 	case strings.Contains(expr, "#done-button"):
-		v = f.nextClicks >= 3
+		v = f.nextClicks >= 3 && !f.stuck
 	case strings.Contains(expr, "input[type=file]"):
 		v = strings.Contains(f.url, "/videos/upload")
 	case strings.Contains(expr, "ytcp-uploads-dialog a[href]") && strings.Contains(expr, "return !!"):
@@ -342,5 +354,34 @@ func TestClosedDialogIsReopenedOnResume(t *testing.T) {
 	}
 	if f.uploads != 1 || !f.dialogOpen || !f.audience || !f.saved {
 		t.Fatalf("studio %+v", f)
+	}
+}
+
+func TestNextUsesDOMClicksAndFallsBackToRealOnes(t *testing.T) {
+	f, rep := newStudio(meta), &fakeReporter{}
+	if res := newRunner(meta, rep).Run(context.Background(), f); res.Outcome != Done {
+		t.Fatalf("dom clicks: %+v", res)
+	}
+	if f.realNext != 0 || f.nextClicks != 3 {
+		t.Fatalf("dom clicks: real=%d next=%d", f.realNext, f.nextClicks)
+	}
+	f, rep = newStudio(meta), &fakeReporter{}
+	f.domNext = true
+	if res := newRunner(meta, rep).Run(context.Background(), f); res.Outcome != Done {
+		t.Fatalf("real clicks: %+v", res)
+	}
+	if f.realNext != 3 {
+		t.Fatalf("real clicks: %d", f.realNext)
+	}
+}
+
+func TestStalledUploadIsFatal(t *testing.T) {
+	f, rep := newStudio(meta), &fakeReporter{}
+	f.stuck = true
+	r := newRunner(meta, rep)
+	r.StallTimeout = 20 * time.Millisecond
+	res := r.Run(context.Background(), f)
+	if res.Outcome != Failed || !res.Fatal || res.Step.Name != "wait_upload" || !strings.Contains(res.Err.Error(), "no progress") {
+		t.Fatalf("stall: %+v", res)
 	}
 }

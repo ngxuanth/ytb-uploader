@@ -106,6 +106,9 @@ func runUpload(ctx context.Context, u uploadRun) uploadSummary {
 	if claim.ThumbnailPath != "" {
 		task.ThumbPath = filepath.Join(u.UploadDir, claim.ThumbnailPath)
 	}
+	if fi, err := os.Stat(task.VideoPath); err == nil {
+		task.VideoSize = fi.Size()
+	}
 	r := playbook.New(task, &reporter{c: client, taskID: claim.TaskID}, func(f string, a ...any) {
 		logf("task %s: "+f, append([]any{u.ID}, a...)...)
 	})

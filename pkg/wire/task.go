@@ -110,3 +110,17 @@ type Metadata struct {
 	MadeForKids bool       `json:"made_for_kids"`
 	ScheduleAt  *time.Time `json:"schedule_at,omitempty"`
 }
+
+// UploadBudget is how long an upload of a size-byte file may take end to
+// end: a fixed part for opening Studio, filling the details and YouTube's
+// checks, plus sending the file at a slow 512 KiB/s. A 2 MB clip gets about
+// 20 minutes, 1 GB about 54 minutes. The server uses it for the task
+// deadline, the launcher for the session, the playbook for its upload wait.
+func UploadBudget(size int64) time.Duration {
+	const base = 20 * time.Minute
+	const rate = 512 << 10 // bytes per second
+	if size < 0 {
+		size = 0
+	}
+	return base + time.Duration(size/rate)*time.Second
+}

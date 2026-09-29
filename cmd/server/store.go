@@ -18,6 +18,7 @@ type job struct {
 	Claim     *taskmcp.ClaimOut `json:"claim"`
 	Token     string            `json:"token"`
 	Sum       string            `json:"sha256"`
+	Size      int64             `json:"size"`
 	Ext       string            `json:"ext"`
 	VideoPath string            `json:"video_path"`
 	ThumbPath string            `json:"thumb_path,omitempty"`
