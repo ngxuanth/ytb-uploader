@@ -8,8 +8,8 @@ import (
 	"sort"
 	"time"
 
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/taskmcp"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/wire"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/adapter/taskmcp"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/contract"
 )
 
 // job is one upload task and everything known about it. It is saved as JSON,
@@ -37,17 +37,17 @@ type job struct {
 	ParentID string `json:"parent_id,omitempty"`
 	// VideoState is the last state read in Studio for this upload's video;
 	// Rechecks counts the automatic checks while it was processing.
-	VideoState *wire.VideoState `json:"video_state,omitempty"`
-	Rechecks   int              `json:"rechecks,omitempty"`
+	VideoState *contract.VideoState `json:"video_state,omitempty"`
+	Rechecks   int                  `json:"rechecks,omitempty"`
 
-	Status    wire.Status    `json:"status"`
-	Step      string         `json:"step,omitempty"`
-	Progress  int            `json:"progress"`
-	Message   string         `json:"message,omitempty"`
-	VideoID   string         `json:"video_id,omitempty"`
-	VideoURL  string         `json:"video_url,omitempty"`
-	ErrorCode wire.ErrorCode `json:"error_code,omitempty"`
-	Error     string         `json:"error,omitempty"`
+	Status    contract.Status    `json:"status"`
+	Step      string             `json:"step,omitempty"`
+	Progress  int                `json:"progress"`
+	Message   string             `json:"message,omitempty"`
+	VideoID   string             `json:"video_id,omitempty"`
+	VideoURL  string             `json:"video_url,omitempty"`
+	ErrorCode contract.ErrorCode `json:"error_code,omitempty"`
+	Error     string             `json:"error,omitempty"`
 	// Finish is nil until the agent calls task_finish for this attempt.
 	Finish *finishInfo `json:"finish,omitempty"`
 	// Session is nil until the launcher reports that the harness exited.

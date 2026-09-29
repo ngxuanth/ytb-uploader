@@ -26,8 +26,8 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/adaptor"
 
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/taskmcp"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/wire"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/adapter/taskmcp"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/contract"
 )
 
 func main() {
@@ -68,11 +68,11 @@ type uploadIn struct {
 
 // agentInfo is what the connected launcher announced.
 type agentInfo struct {
-	AgentID     string              `json:"agent_id"`
-	Version     string              `json:"version"`
-	Profiles    []wire.ProfileState `json:"profiles"`
-	ConnectedAt time.Time           `json:"connected_at"`
-	LastSeen    time.Time           `json:"last_seen"`
+	AgentID     string                  `json:"agent_id"`
+	Version     string                  `json:"version"`
+	Profiles    []contract.ProfileState `json:"profiles"`
+	ConnectedAt time.Time               `json:"connected_at"`
+	LastSeen    time.Time               `json:"last_seen"`
 }
 
 type state struct {
@@ -131,7 +131,7 @@ func (st *state) sendToLocked(agentID, typ string, data any) error {
 		if a.info.AgentID != agentID {
 			continue
 		}
-		msg, err := wire.NewEnvelope(typ, data)
+		msg, err := contract.NewEnvelope(typ, data)
 		if err != nil {
 			return err
 		}
@@ -186,8 +186,8 @@ func (st *state) upload(c fiber.Ctx) error {
 	if in.Visibility == "" {
 		in.Visibility = "private"
 	}
-	switch wire.Visibility(in.Visibility) {
-	case wire.VisibilityPublic, wire.VisibilityUnlisted, wire.VisibilityPrivate:
+	switch contract.Visibility(in.Visibility) {
+	case contract.VisibilityPublic, contract.VisibilityUnlisted, contract.VisibilityPrivate:
 	default:
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "visibility must be public, unlisted or private"})
 	}
@@ -241,11 +241,11 @@ func (st *state) newJob(in uploadIn) (*job, error) {
 			TaskID: "srv-" + randHex(4), Attempt: 1,
 			FilePath: "video" + ext, ChannelID: in.Channel,
 			ProfileDirectory: in.Profile,
-			Metadata: &wire.Metadata{
-				Title: in.Title, Description: in.Description, Visibility: wire.Visibility(in.Visibility),
+			Metadata: &contract.Metadata{
+				Title: in.Title, Description: in.Description, Visibility: contract.Visibility(in.Visibility),
 			},
 		},
-		Status: wire.StatusQueued, CreatedAt: now, UpdatedAt: now,
+		Status: contract.StatusQueued, CreatedAt: now, UpdatedAt: now,
 	}
 	if in.Thumbnail != "" {
 		if _, err := os.Stat(in.Thumbnail); err != nil {
@@ -289,7 +289,7 @@ func (st *state) ws(conn *websocket.Conn) {
 		conn.Close()
 	}()
 	for {
-		var env wire.Envelope
+		var env contract.Envelope
 		if err := conn.ReadJSON(&env); err != nil {
 			log.Printf("socket: %v", err)
 			return
@@ -300,8 +300,8 @@ func (st *state) ws(conn *websocket.Conn) {
 		}
 		st.mu.Unlock()
 		switch env.Type {
-		case wire.MsgHello:
-			var hello wire.Hello
+		case contract.MsgHello:
+			var hello contract.Hello
 			if err := json.Unmarshal(env.Data, &hello); err != nil {
 				log.Printf("hello: %v", err)
 				continue
@@ -321,26 +321,26 @@ func (st *state) ws(conn *websocket.Conn) {
 			st.dispatchLocked()
 			st.mu.Unlock()
 			log.Printf("agent %s profiles: %s", hello.AgentID, strings.Join(dirs, ", "))
-		case wire.MsgReject:
-			var rej wire.Reject
+		case contract.MsgReject:
+			var rej contract.Reject
 			if err := json.Unmarshal(env.Data, &rej); err != nil {
 				log.Printf("reject: %v", err)
 				continue
 			}
 			log.Printf("agent rejected %s: %s", rej.TaskID, rej.Reason)
 			st.onReject(rej)
-		case wire.MsgEvent:
-			var ev wire.Event
+		case contract.MsgEvent:
+			var ev contract.Event
 			if err := json.Unmarshal(env.Data, &ev); err != nil {
 				log.Printf("event: %v", err)
 				continue
 			}
-			if ev.Type == wire.EventSessionEnded {
+			if ev.Type == contract.EventSessionEnded {
 				st.onSessionEnded(ev)
 			} else {
 				log.Printf("event %s %s", ev.TaskID, ev.Type)
 			}
-		case wire.MsgHeartbeat:
+		case contract.MsgHeartbeat:
 			log.Printf("heartbeat %s", env.Data)
 		default:
 			log.Printf("message %s", env.Type)
@@ -349,7 +349,7 @@ func (st *state) ws(conn *websocket.Conn) {
 }
 
 // attemptLocked returns the job if ref is its current attempt.
-func (st *state) attemptLocked(ref wire.TaskRef) *job {
+func (st *state) attemptLocked(ref contract.TaskRef) *job {
 	j := st.byID[ref.TaskID]
 	if j == nil || (ref.Attempt != 0 && ref.Attempt != j.Claim.Attempt) {
 		return nil
@@ -357,7 +357,7 @@ func (st *state) attemptLocked(ref wire.TaskRef) *job {
 	return j
 }
 
-func (st *state) onReject(rej wire.Reject) {
+func (st *state) onReject(rej contract.Reject) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	j := st.attemptLocked(rej.TaskRef)
@@ -366,13 +366,13 @@ func (st *state) onReject(rej wire.Reject) {
 	}
 	j.addEvent(eventEntry{Event: "rejected", Message: rej.Reason})
 	if !j.Status.Terminal() {
-		j.Status, j.Error, j.Stop = wire.StatusFailed, rej.Reason, true
+		j.Status, j.Error, j.Stop = contract.StatusFailed, rej.Reason, true
 	}
 	st.releaseLocked(j)
 	st.dispatchLocked()
 }
 
-func (st *state) onSessionEnded(ev wire.Event) {
+func (st *state) onSessionEnded(ev contract.Event) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	j := st.attemptLocked(ev.TaskRef)
@@ -410,7 +410,7 @@ func (st *state) onSessionEnded(ev wire.Event) {
 	j.addEvent(eventEntry{Event: "session_ended", Message: msg})
 	// The harness is gone. Without task_finish nobody will finish this attempt.
 	if j.Finish == nil && !j.Status.Terminal() {
-		j.Status, j.ErrorCode = wire.StatusLost, wire.ErrAgentLost
+		j.Status, j.ErrorCode = contract.StatusLost, contract.ErrAgentLost
 		j.Error = "session ended without task_finish"
 		if s.Error != "" {
 			j.Error += ": " + s.Error
@@ -424,15 +424,15 @@ func (st *state) onSessionEnded(ev wire.Event) {
 	st.dispatchLocked()
 }
 
-func (st *state) assign(j *job) wire.Assign {
-	task := wire.TaskSpec{
+func (st *state) assign(j *job) contract.Assign {
+	task := contract.TaskSpec{
 		TaskID: j.Claim.TaskID, Attempt: j.Claim.Attempt,
 		ProfileDirectory: j.Claim.ProfileDirectory,
 		SHA256:           j.Sum, FileExt: j.Ext, Kind: j.Claim.Kind,
 		ExistingVideoID: j.Claim.ExistingVideoID,
 		FileSize:        j.Size,
 		// Big files get longer: the deadline grows with the upload.
-		Deadline: time.Now().Add(max(45*time.Minute, wire.UploadBudget(j.Size))),
+		Deadline: time.Now().Add(max(45*time.Minute, contract.UploadBudget(j.Size))),
 	}
 	if j.VideoName != "" {
 		task.FileURL = st.base + "/files/" + j.Claim.TaskID + "/" + j.VideoName
@@ -440,10 +440,10 @@ func (st *state) assign(j *job) wire.Assign {
 	if j.ThumbName != "" {
 		task.ThumbnailURL = st.base + "/files/" + j.Claim.TaskID + "/" + j.ThumbName
 	}
-	return wire.Assign{
+	return contract.Assign{
 		Task:      task,
-		TaskMCP:   wire.MCPEndpoint{URL: st.base + "/task/mcp", Token: j.Token},
-		ReportMCP: wire.MCPEndpoint{URL: st.base + "/report/mcp", Token: j.Token},
+		TaskMCP:   contract.MCPEndpoint{URL: st.base + "/task/mcp", Token: j.Token},
+		ReportMCP: contract.MCPEndpoint{URL: st.base + "/report/mcp", Token: j.Token},
 	}
 }
 
@@ -505,8 +505,8 @@ func (st *state) Report(_ context.Context, s *taskmcp.Session, in taskmcp.Report
 		if in.Progress > 0 {
 			j.Progress = in.Progress
 		}
-		if wire.Status(step).In(wire.RunningStatuses) {
-			j.Status = wire.Status(step)
+		if contract.Status(step).In(contract.RunningStatuses) {
+			j.Status = contract.Status(step)
 		}
 	}
 	st.saveLocked()
@@ -551,15 +551,15 @@ func (st *state) Finish(_ context.Context, s *taskmcp.Session, in taskmcp.Finish
 		}
 	}
 	// A cancelled task stays cancelled; the finish is still recorded.
-	if j.Status != wire.StatusCancelled {
+	if j.Status != contract.StatusCancelled {
 		switch strings.ToLower(in.Status) {
 		case "done":
-			j.Status, j.ErrorCode, j.Error = wire.StatusDone, "", ""
+			j.Status, j.ErrorCode, j.Error = contract.StatusDone, "", ""
 			j.Progress = 100
 		case "needs_attention":
-			j.Status, j.ErrorCode, j.Error = wire.StatusNeedsAttention, wire.ErrorCode(in.ErrorCode), in.Reason
+			j.Status, j.ErrorCode, j.Error = contract.StatusNeedsAttention, contract.ErrorCode(in.ErrorCode), in.Reason
 		default:
-			j.Status, j.ErrorCode, j.Error = wire.StatusFailed, wire.ErrorCode(in.ErrorCode), in.Reason
+			j.Status, j.ErrorCode, j.Error = contract.StatusFailed, contract.ErrorCode(in.ErrorCode), in.Reason
 		}
 	}
 	j.Stop = true
@@ -584,7 +584,7 @@ func (st *state) stopAfterGraceLocked(j *job) {
 			return
 		}
 		msg := "session still running " + st.finishGrace.String() + " after task_finish; asked launcher to stop it"
-		if err := st.sendToLocked(j.AgentID, wire.MsgCancel, wire.Cancel{TaskRef: wire.TaskRef{TaskID: id, Attempt: attempt}}); err != nil {
+		if err := st.sendToLocked(j.AgentID, contract.MsgCancel, contract.Cancel{TaskRef: contract.TaskRef{TaskID: id, Attempt: attempt}}); err != nil {
 			msg = "session still running after task_finish; launcher not told: " + err.Error()
 		}
 		j.addEvent(eventEntry{Event: "stop_after_finish", Message: msg})

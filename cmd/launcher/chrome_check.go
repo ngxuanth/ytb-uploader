@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/chromectl"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/driver"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/chrome"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/extension"
 )
 
 // chromeCheck runs what the LLM's setup phase does (chrome_open,
@@ -32,7 +32,7 @@ func chromeCheck(args []string) error {
 	ext, _ := filepath.Abs(*extDir)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	c, err := (&chromectl.Controller{Bin: *chromeBin, UserDataDir: udd, ExtensionDir: ext}).Isolated(ctx, *profile, *debugPort)
+	c, err := (&chrome.Controller{Bin: *chromeBin, UserDataDir: udd, ExtensionDir: ext}).Isolated(ctx, *profile, *debugPort)
 	if err != nil {
 		return err
 	}
@@ -43,7 +43,7 @@ func chromeCheck(args []string) error {
 	}
 	logf("profiles: %+v", ps)
 
-	srv := driver.NewServer(fmt.Sprintf("127.0.0.1:%d", *port))
+	srv := extension.NewServer(fmt.Sprintf("127.0.0.1:%d", *port))
 	go func() { _ = srv.ListenAndServe(ctx) }()
 
 	open, err := c.Open(ctx, *profile)
@@ -60,7 +60,7 @@ func chromeCheck(args []string) error {
 
 	wctx, wcancel := context.WithTimeout(ctx, 20*time.Second)
 	defer wcancel()
-	conn, err := srv.WaitFor(wctx, func(driver.Hello) bool { return true })
+	conn, err := srv.WaitFor(wctx, func(extension.Hello) bool { return true })
 	if err != nil {
 		return fmt.Errorf("extension never connected to port %d: %w", *port, err)
 	}

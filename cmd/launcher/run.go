@@ -20,11 +20,11 @@ import (
 
 	"github.com/fasthttp/websocket"
 
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/chromectl"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/harness"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/session"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/taskmcp"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/wire"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/adapter/taskmcp"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/contract"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/chrome"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/llm/harness"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/llm/session"
 )
 
 const agentVersion = "0.1.0"
@@ -79,7 +79,7 @@ func runAgent(args []string) error {
 	a := &agent{
 		url: *serverURL, id: id, spec: spec, bmcp: *bmcp, launcher: self,
 		work: absWork, timeout: *timeout, runner: *runner, failAt: *failAt,
-		chrome:  &chromectl.Controller{Bin: *chromeBin, UserDataDir: absUDD, DebugPort: *debugPort, ExtensionDir: absExt},
+		chrome:  &chrome.Controller{Bin: *chromeBin, UserDataDir: absUDD, DebugPort: *debugPort, ExtensionDir: absExt},
 		running: map[string]*runningTask{},
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -98,7 +98,7 @@ type agent struct {
 	spec                          harness.Spec
 	timeout                       time.Duration
 	runner, failAt                string
-	chrome                        *chromectl.Controller
+	chrome                        *chrome.Controller
 
 	mu      sync.Mutex
 	conn    *websocket.Conn
@@ -157,12 +157,12 @@ func (a *agent) serve(ctx context.Context) error {
 		conn.Close()
 	}()
 	go a.heartbeat(connCtx, conn)
-	if err := a.send(conn, wire.MsgHello, a.hello()); err != nil {
+	if err := a.send(conn, contract.MsgHello, a.hello()); err != nil {
 		return err
 	}
 	logf("connected to %s", a.url)
 	for {
-		var env wire.Envelope
+		var env contract.Envelope
 		if err := conn.ReadJSON(&env); err != nil {
 			return err
 		}
@@ -170,8 +170,8 @@ func (a *agent) serve(ctx context.Context) error {
 	}
 }
 
-func (a *agent) hello() wire.Hello {
-	var profiles []wire.ProfileState
+func (a *agent) hello() contract.Hello {
+	var profiles []contract.ProfileState
 	ps, err := a.chrome.Profiles()
 	if err != nil {
 		logf("profiles: %v", err)
@@ -179,13 +179,13 @@ func (a *agent) hello() wire.Hello {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, p := range ps {
-		st := wire.ProfileState{Directory: p.Directory, Email: p.Email, Online: true}
+		st := contract.ProfileState{Directory: p.Directory, Email: p.Email, Online: true}
 		if run, ok := a.running[p.Directory]; ok {
 			st.RunningTaskID = run.taskID
 		}
 		profiles = append(profiles, st)
 	}
-	return wire.Hello{AgentID: a.id, Version: agentVersion, Profiles: profiles}
+	return contract.Hello{AgentID: a.id, Version: agentVersion, Profiles: profiles}
 }
 
 func (a *agent) heartbeat(ctx context.Context, conn *websocket.Conn) {
@@ -197,39 +197,39 @@ func (a *agent) heartbeat(ctx context.Context, conn *websocket.Conn) {
 			return
 		case <-t.C:
 			a.mu.Lock()
-			var running []wire.RunningTask
+			var running []contract.RunningTask
 			for _, r := range a.running {
-				running = append(running, wire.RunningTask{TaskID: r.taskID, Attempt: r.attempt, Status: wire.StatusAssigned})
+				running = append(running, contract.RunningTask{TaskID: r.taskID, Attempt: r.attempt, Status: contract.StatusAssigned})
 			}
 			a.mu.Unlock()
-			if err := a.send(conn, wire.MsgHeartbeat, wire.Heartbeat{Running: running}); err != nil {
+			if err := a.send(conn, contract.MsgHeartbeat, contract.Heartbeat{Running: running}); err != nil {
 				return
 			}
 		}
 	}
 }
 
-func (a *agent) onMessage(ctx context.Context, conn *websocket.Conn, env wire.Envelope) {
+func (a *agent) onMessage(ctx context.Context, conn *websocket.Conn, env contract.Envelope) {
 	switch env.Type {
-	case wire.MsgAssign:
-		var msg wire.Assign
+	case contract.MsgAssign:
+		var msg contract.Assign
 		if err := unmarshal(env, &msg); err != nil {
 			logf("assign: %v", err)
 			return
 		}
 		if reason := a.reserve(ctx, msg); reason != "" {
 			logf("reject %s: %s", msg.Task.TaskID, reason)
-			_ = a.send(conn, wire.MsgReject, wire.Reject{TaskRef: wire.TaskRef{TaskID: msg.Task.TaskID, Attempt: msg.Task.Attempt}, Reason: reason})
+			_ = a.send(conn, contract.MsgReject, contract.Reject{TaskRef: contract.TaskRef{TaskID: msg.Task.TaskID, Attempt: msg.Task.Attempt}, Reason: reason})
 		}
-	case wire.MsgCancel:
-		var msg wire.Cancel
+	case contract.MsgCancel:
+		var msg contract.Cancel
 		if err := unmarshal(env, &msg); err != nil {
 			logf("cancel: %v", err)
 			return
 		}
 		a.cancel(msg.TaskID)
-	case wire.MsgDrain:
-		var msg wire.Drain
+	case contract.MsgDrain:
+		var msg contract.Drain
 		if err := unmarshal(env, &msg); err != nil {
 			logf("drain: %v", err)
 			return
@@ -242,7 +242,7 @@ func (a *agent) onMessage(ctx context.Context, conn *websocket.Conn, env wire.En
 }
 
 // reserve starts the task or returns why it was refused.
-func (a *agent) reserve(ctx context.Context, msg wire.Assign) string {
+func (a *agent) reserve(ctx context.Context, msg contract.Assign) string {
 	task := msg.Task
 	if task.ProfileDirectory == "" || task.TaskID == "" {
 		return "task is missing profile_directory or task_id"
@@ -267,12 +267,12 @@ func (a *agent) reserve(ctx context.Context, msg wire.Assign) string {
 	return ""
 }
 
-func (a *agent) execute(ctx context.Context, cancel context.CancelFunc, msg wire.Assign) {
+func (a *agent) execute(ctx context.Context, cancel context.CancelFunc, msg contract.Assign) {
 	defer cancel()
 	defer a.release(msg.Task.ProfileDirectory, msg.Task.TaskID)
 	task := msg.Task
 	// A big file needs longer than the default session timeout.
-	timeout := max(a.timeout, wire.UploadBudget(task.FileSize))
+	timeout := max(a.timeout, contract.UploadBudget(task.FileSize))
 	if !task.Deadline.IsZero() {
 		if d := time.Until(task.Deadline); d < timeout {
 			timeout = d
@@ -313,15 +313,15 @@ func (a *agent) execute(ctx context.Context, cancel context.CancelFunc, msg wire
 		a.fail(task, err)
 		return
 	}
-	chrome, err := a.chrome.Isolated(ctx, task.ProfileDirectory, debugPort)
+	ctl, err := a.chrome.Isolated(ctx, task.ProfileDirectory, debugPort)
 	if err != nil {
 		a.fail(task, err)
 		return
 	}
-	logf("task %s profile %s bmcp %d debug %d runner %s", task.TaskID, task.ProfileDirectory, port, chrome.DebugPort, a.runner)
+	logf("task %s profile %s bmcp %d debug %d runner %s", task.TaskID, task.ProfileDirectory, port, ctl.DebugPort, a.runner)
 	began := time.Now()
 	sum := runUpload(ctx, uploadRun{
-		ID: task.TaskID, Profile: task.ProfileDirectory, Chrome: chrome, Port: port,
+		ID: task.TaskID, Profile: task.ProfileDirectory, Chrome: ctl, Port: port,
 		SessionDir: sessionDir, UploadDir: uploadDir,
 		Task:   session.Endpoint{URL: msg.TaskMCP.URL, Token: msg.TaskMCP.Token},
 		Report: session.Endpoint{URL: msg.ReportMCP.URL, Token: msg.ReportMCP.Token},
@@ -339,7 +339,7 @@ func (a *agent) execute(ctx context.Context, cancel context.CancelFunc, msg wire
 
 // sessionEnded tells the server the harness exited, so it can tell a session
 // that called task_finish from one that stopped without it.
-func (a *agent) sessionEnded(task wire.TaskSpec, sum uploadSummary) {
+func (a *agent) sessionEnded(task contract.TaskSpec, sum uploadSummary) {
 	out, runErr := sum.Out, sum.Err
 	a.mu.Lock()
 	conn := a.conn
@@ -354,13 +354,13 @@ func (a *agent) sessionEnded(task wire.TaskSpec, sum uploadSummary) {
 	if runErr != nil {
 		data["error"] = runErr.Error()
 	}
-	_ = a.send(conn, wire.MsgEvent, wire.Event{
-		TaskRef: wire.TaskRef{TaskID: task.TaskID, Attempt: task.Attempt},
-		Type:    wire.EventSessionEnded, Data: data, At: time.Now(),
+	_ = a.send(conn, contract.MsgEvent, contract.Event{
+		TaskRef: contract.TaskRef{TaskID: task.TaskID, Attempt: task.Attempt},
+		Type:    contract.EventSessionEnded, Data: data, At: time.Now(),
 	})
 }
 
-func (a *agent) fail(task wire.TaskSpec, err error) {
+func (a *agent) fail(task contract.TaskSpec, err error) {
 	logf("task %s: %v", task.TaskID, err)
 	a.mu.Lock()
 	conn := a.conn
@@ -368,8 +368,8 @@ func (a *agent) fail(task wire.TaskSpec, err error) {
 	if conn == nil {
 		return
 	}
-	_ = a.send(conn, wire.MsgReject, wire.Reject{
-		TaskRef: wire.TaskRef{TaskID: task.TaskID, Attempt: task.Attempt},
+	_ = a.send(conn, contract.MsgReject, contract.Reject{
+		TaskRef: contract.TaskRef{TaskID: task.TaskID, Attempt: task.Attempt},
 		Reason:  err.Error(),
 	})
 }
@@ -403,7 +403,7 @@ func (a *agent) stopAll() {
 }
 
 func (a *agent) send(conn *websocket.Conn, typ string, data any) error {
-	env, err := wire.NewEnvelope(typ, data)
+	env, err := contract.NewEnvelope(typ, data)
 	if err != nil {
 		return err
 	}
@@ -415,7 +415,7 @@ func (a *agent) send(conn *websocket.Conn, typ string, data any) error {
 	return conn.WriteJSON(env)
 }
 
-func unmarshal(env wire.Envelope, dest any) error {
+func unmarshal(env contract.Envelope, dest any) error {
 	if len(env.Data) == 0 {
 		return errors.New("empty data")
 	}

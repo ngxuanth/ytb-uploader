@@ -8,8 +8,8 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/taskmcp"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/wire"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/adapter/taskmcp"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/contract"
 )
 
 // A video's state in Studio (visibility, processing, restrictions) comes in
@@ -74,7 +74,7 @@ func (st *state) newCheckLocked(parent *job, reason string) *job {
 			ExistingVideoID: parent.VideoID,
 		},
 		ParentID:  parent.Claim.TaskID,
-		Status:    wire.StatusQueued,
+		Status:    contract.StatusQueued,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	st.byID[c.Claim.TaskID] = c
@@ -89,7 +89,7 @@ func (st *state) newCheckLocked(parent *job, reason string) *job {
 // pendingCheckLocked is a check of parent that has not ended yet.
 func (st *state) pendingCheckLocked(parent *job) *job {
 	for _, j := range st.byID {
-		if j.ParentID == parent.Claim.TaskID && !j.Status.Terminal() && j.Status != wire.StatusLost && j.Status != wire.StatusNeedsAttention {
+		if j.ParentID == parent.Claim.TaskID && !j.Status.Terminal() && j.Status != contract.StatusLost && j.Status != contract.StatusNeedsAttention {
 			return j
 		}
 	}
@@ -117,15 +117,15 @@ func (st *state) recheckLaterLocked(parent *job) {
 
 // videoView is GET /tasks/:id/video.
 type videoView struct {
-	TaskID     string           `json:"task_id"`
-	Profile    string           `json:"profile"`
-	Title      string           `json:"title"`
-	Status     wire.Status      `json:"status"`
-	VideoID    string           `json:"video_id,omitempty"`
-	VideoURL   string           `json:"video_url,omitempty"`
-	VideoState *wire.VideoState `json:"video_state,omitempty"`
-	Rechecks   int              `json:"rechecks"`
-	Checks     []taskView       `json:"checks,omitempty"`
+	TaskID     string               `json:"task_id"`
+	Profile    string               `json:"profile"`
+	Title      string               `json:"title"`
+	Status     contract.Status      `json:"status"`
+	VideoID    string               `json:"video_id,omitempty"`
+	VideoURL   string               `json:"video_url,omitempty"`
+	VideoState *contract.VideoState `json:"video_state,omitempty"`
+	Rechecks   int                  `json:"rechecks"`
+	Checks     []taskView           `json:"checks,omitempty"`
 }
 
 func (st *state) videoViewLocked(j *job, withChecks bool) videoView {

@@ -10,15 +10,15 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/cdp"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/chromectl"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/driver"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/harness"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/playbook"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/prompt"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/session"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/taskmcp"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/wire"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/adapter/taskmcp"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/contract"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/chrome"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/chrome/cdp"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/extension"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/llm/harness"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/llm/prompt"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/llm/session"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/studio"
 )
 
 // Runners.
@@ -34,8 +34,8 @@ const (
 type uploadRun struct {
 	ID         string // task id, used in logs
 	Profile    string
-	Chrome     *chromectl.Controller // this profile's own Chrome (Isolated)
-	Port       int                   // the extension's WebSocket port for this attempt
+	Chrome     *chrome.Controller // this profile's own Chrome (Isolated)
+	Port       int                // the extension's WebSocket port for this attempt
 	SessionDir string
 	UploadDir  string
 	Task       session.Endpoint
@@ -99,7 +99,7 @@ func runUpload(ctx context.Context, u uploadRun) uploadSummary {
 		return sum
 	}
 
-	task := playbook.Task{
+	task := studio.Task{
 		ExistingVideoID: claim.ExistingVideoID,
 		ChannelID:       claim.ChannelID,
 		VideoPath:       filepath.Join(u.UploadDir, claim.FilePath),
@@ -111,14 +111,14 @@ func runUpload(ctx context.Context, u uploadRun) uploadSummary {
 	if fi, err := os.Stat(task.VideoPath); err == nil {
 		task.VideoSize = fi.Size()
 	}
-	r := playbook.New(task, &reporter{c: client, taskID: claim.TaskID}, func(f string, a ...any) {
+	r := studio.New(task, &reporter{c: client, taskID: claim.TaskID}, func(f string, a ...any) {
 		logf("task %s: "+f, append([]any{u.ID}, a...)...)
 	})
 	r.FailAt = u.FailAt
 
 	for first := true; ; first = false {
 		res, snap := u.drive(ctx, r, task, first)
-		if res.Outcome != playbook.Failed {
+		if res.Outcome != studio.Failed {
 			logf("task %s: playbook ended (%v) after %s", u.ID, res.Outcome, time.Since(start).Round(time.Second))
 			return sum
 		}
@@ -182,11 +182,11 @@ func runUpload(ctx context.Context, u uploadRun) uploadSummary {
 // fails and can be retried.
 func (u uploadRun) check(ctx context.Context, client *taskmcp.Client, claim *taskmcp.ClaimOut, sum uploadSummary) uploadSummary {
 	rep := &reporter{c: client, taskID: claim.TaskID}
-	task := playbook.Task{ExistingVideoID: claim.ExistingVideoID, ChannelID: claim.ChannelID}
-	r := playbook.New(task, rep, func(f string, a ...any) {
+	task := studio.Task{ExistingVideoID: claim.ExistingVideoID, ChannelID: claim.ChannelID}
+	r := studio.New(task, rep, func(f string, a ...any) {
 		logf("task %s: "+f, append([]any{u.ID}, a...)...)
 	})
-	err := u.withDriver(ctx, task, func(b *driver.Browser) error { return r.Check(ctx, b) })
+	err := u.withDriver(ctx, task, func(b *extension.Browser) error { return r.Check(ctx, b) })
 	status, code, reason := "done", "", ""
 	if err != nil {
 		status, code, reason = "failed", "STEP_FAILED", "check_video: "+err.Error()
@@ -200,9 +200,9 @@ func (u uploadRun) check(ctx context.Context, client *taskmcp.Client, claim *tas
 
 // withDriver opens this profile's Chrome, points the extension at a driver
 // on the attempt's port and runs fn with the connected browser.
-func (u uploadRun) withDriver(ctx context.Context, task playbook.Task, fn func(*driver.Browser) error) error {
+func (u uploadRun) withDriver(ctx context.Context, task studio.Task, fn func(*extension.Browser) error) error {
 	dctx, cancel := context.WithCancel(ctx)
-	srv := driver.NewServer(fmt.Sprintf("127.0.0.1:%d", u.Port))
+	srv := extension.NewServer(fmt.Sprintf("127.0.0.1:%d", u.Port))
 	done := make(chan struct{})
 	var lerr error
 	go func() { lerr = srv.ListenAndServe(dctx); close(done) }()
@@ -228,12 +228,12 @@ func (u uploadRun) withDriver(ctx context.Context, task playbook.Task, fn func(*
 // drive runs the playbook with a driver listening on the attempt's port. The
 // listener is closed before returning, so an LLM session's bmcp can take
 // the same port next.
-func (u uploadRun) drive(ctx context.Context, r *playbook.Runner, task playbook.Task, first bool) (playbook.Result, string) {
-	failed := func(err error) (playbook.Result, string) {
-		return playbook.Result{Outcome: playbook.Failed, Step: r.Current(), Err: err, Fatal: true}, ""
+func (u uploadRun) drive(ctx context.Context, r *studio.Runner, task studio.Task, first bool) (studio.Result, string) {
+	failed := func(err error) (studio.Result, string) {
+		return studio.Result{Outcome: studio.Failed, Step: r.Current(), Err: err, Fatal: true}, ""
 	}
 	dctx, cancel := context.WithCancel(ctx)
-	srv := driver.NewServer(fmt.Sprintf("127.0.0.1:%d", u.Port))
+	srv := extension.NewServer(fmt.Sprintf("127.0.0.1:%d", u.Port))
 	done := make(chan struct{})
 	var lerr error
 	go func() { lerr = srv.ListenAndServe(dctx); close(done) }()
@@ -270,7 +270,7 @@ func (u uploadRun) drive(ctx context.Context, r *playbook.Runner, task playbook.
 		}
 	}
 	res := r.Run(dctx, b)
-	if res.Outcome != playbook.Failed {
+	if res.Outcome != studio.Failed {
 		return res, ""
 	}
 	snap, _ := b.Snapshot(dctx)
@@ -288,10 +288,10 @@ func (u uploadRun) drive(ctx context.Context, r *playbook.Runner, task playbook.
 	return res, snap
 }
 
-func waitExtension(ctx context.Context, srv *driver.Server, d time.Duration) (*driver.Conn, error) {
+func waitExtension(ctx context.Context, srv *extension.Server, d time.Duration) (*extension.Conn, error) {
 	wctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
-	return srv.WaitFor(wctx, func(driver.Hello) bool { return true })
+	return srv.WaitFor(wctx, func(extension.Hello) bool { return true })
 }
 
 // fixStep runs an LLM session for one step and stops it as soon as the
@@ -408,7 +408,7 @@ func (u uploadRun) llm(ctx context.Context, dir, text string, extraCancel <-chan
 
 // hideAttachedVideo moves the video out of the upload dir once the script
 // attached it, so the LLM finishing the task cannot upload a second copy.
-func (u uploadRun) hideAttachedVideo(r *playbook.Runner, task playbook.Task) {
+func (u uploadRun) hideAttachedVideo(r *studio.Runner, task studio.Task) {
 	if !r.Attached() {
 		return
 	}
@@ -424,7 +424,7 @@ type reporter struct {
 	taskID string
 }
 
-func (r *reporter) Report(ctx context.Context, step wire.Status, msg string, progress int) (bool, error) {
+func (r *reporter) Report(ctx context.Context, step contract.Status, msg string, progress int) (bool, error) {
 	ack, err := r.c.Report(ctx, taskmcp.ReportIn{TaskID: r.taskID, Step: string(step), Progress: progress, Message: msg})
 	if err != nil {
 		return false, err
@@ -440,7 +440,7 @@ func (r *reporter) VideoCreated(ctx context.Context, id, url string) (bool, erro
 	return ack.Control == taskmcp.Stop, nil
 }
 
-func (r *reporter) VideoState(ctx context.Context, st wire.VideoState) (bool, error) {
+func (r *reporter) VideoState(ctx context.Context, st contract.VideoState) (bool, error) {
 	ack, err := r.c.VideoState(ctx, taskmcp.VideoStateIn{TaskID: r.taskID, VideoState: st})
 	if err != nil {
 		return false, err

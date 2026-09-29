@@ -19,11 +19,11 @@ import (
 	"syscall"
 	"time"
 
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/chromectl"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/harness"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/session"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/taskmcp"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/wire"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/adapter/taskmcp"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/contract"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/chrome"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/llm/harness"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/llm/session"
 )
 
 // try runs one upload end to end on this machine without the server: a
@@ -98,8 +98,8 @@ func try(args []string) error {
 		}
 	}
 
-	meta := wire.Metadata{
-		Title: *title, Description: *desc, Visibility: wire.Visibility(*visibility),
+	meta := contract.Metadata{
+		Title: *title, Description: *desc, Visibility: contract.Visibility(*visibility),
 		Tags: splitList(*tags), Playlists: splitList(*playlists),
 	}
 	be := newLocalBackend(sessionID, randHex(24), &taskmcp.ClaimOut{
@@ -143,17 +143,17 @@ func try(args []string) error {
 			}
 		}()
 	}
-	chrome, err := (&chromectl.Controller{Bin: *chromeBin, UserDataDir: absUDD, ExtensionDir: absExt}).Isolated(ctx, *profile, *debugPort)
+	ctl, err := (&chrome.Controller{Bin: *chromeBin, UserDataDir: absUDD, ExtensionDir: absExt}).Isolated(ctx, *profile, *debugPort)
 	if err != nil {
 		return err
 	}
 	sum := runUpload(ctx, uploadRun{
-		ID: sessionID, Profile: *profile, Chrome: chrome, Port: *port,
+		ID: sessionID, Profile: *profile, Chrome: ctl, Port: *port,
 		SessionDir: sessionDir, UploadDir: uploadDir,
 		Task:   session.Endpoint{URL: "http://" + taskLn.Addr().String() + "/mcp", Token: be.token},
 		Report: session.Endpoint{URL: "http://" + reportLn.Addr().String() + "/mcp", Token: be.token},
 		Spec:   spec, BMCP: *bmcp, Launcher: self,
-		Timeout: max(*timeout, wire.UploadBudget(fileSize(*video))), Idle: *idle, IdleFor: be.idleFor,
+		Timeout: max(*timeout, contract.UploadBudget(fileSize(*video))), Idle: *idle, IdleFor: be.idleFor,
 		Cancel: cancelC, OnCancel: be.requestStop,
 		Runner: *runner, FailAt: *failAt,
 	})
@@ -301,14 +301,14 @@ func ack(c taskmcp.Control) *taskmcp.Ack {
 
 // verifyVideo does not trust the LLM: the id must match the one reported
 // when the video was created, and public/unlisted videos must be reachable.
-func verifyVideo(created, finished string, vis wire.Visibility) (bool, string) {
+func verifyVideo(created, finished string, vis contract.Visibility) (bool, string) {
 	if finished == "" {
 		return false, "no video_id in task_finish"
 	}
 	if created != "" && created != finished {
 		return false, fmt.Sprintf("task_finish video %s differs from created video %s", finished, created)
 	}
-	if vis == wire.VisibilityPrivate {
+	if vis == contract.VisibilityPrivate {
 		return false, "private video: not publicly checkable"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

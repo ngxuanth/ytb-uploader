@@ -8,8 +8,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/chromectl"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/chromemcp"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/adapter/chromemcp"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/chrome"
 )
 
 // Environment of the "chrome" MCP server, set by the launcher per session.
@@ -48,7 +48,7 @@ func mcpChrome() error {
 		return fmt.Errorf("%s: %w", envWSPort, err)
 	}
 	srv := chromemcp.NewServer(chromemcp.Config{
-		Controller: &chromectl.Controller{Bin: vals[0], UserDataDir: vals[1], DebugPort: debugPort, ExtensionDir: vals[3]},
+		Controller: &chrome.Controller{Bin: vals[0], UserDataDir: vals[1], DebugPort: debugPort, ExtensionDir: vals[3]},
 		Profile:    vals[4],
 		WSPort:     wsPort,
 	})

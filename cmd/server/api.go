@@ -9,35 +9,35 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/wire"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/contract"
 )
 
 // taskView is what the REST API returns for a task. It leaves out the token
 // and local paths.
 type taskView struct {
-	TaskID          string      `json:"task_id"`
-	Attempt         int         `json:"attempt"`
-	Profile         string      `json:"profile"`
-	Channel         string      `json:"channel,omitempty"`
-	Title           string      `json:"title"`
-	Visibility      string      `json:"visibility"`
-	Status          wire.Status `json:"status"`
-	Step            string      `json:"step,omitempty"`
-	Progress        int         `json:"progress"`
-	Message         string      `json:"message,omitempty"`
-	VideoID         string      `json:"video_id,omitempty"`
-	VideoURL        string      `json:"video_url,omitempty"`
-	ExistingVideoID string      `json:"existing_video_id,omitempty"`
+	TaskID          string          `json:"task_id"`
+	Attempt         int             `json:"attempt"`
+	Profile         string          `json:"profile"`
+	Channel         string          `json:"channel,omitempty"`
+	Title           string          `json:"title"`
+	Visibility      string          `json:"visibility"`
+	Status          contract.Status `json:"status"`
+	Step            string          `json:"step,omitempty"`
+	Progress        int             `json:"progress"`
+	Message         string          `json:"message,omitempty"`
+	VideoID         string          `json:"video_id,omitempty"`
+	VideoURL        string          `json:"video_url,omitempty"`
+	ExistingVideoID string          `json:"existing_video_id,omitempty"`
 	// QueuePosition is 1 for the next task of the profile, 0 when not queued.
 	QueuePosition int `json:"queue_position"`
 	// Kind is upload or check_video; ParentID is the upload a check reads.
-	Kind       string           `json:"kind,omitempty"`
-	ParentID   string           `json:"parent_id,omitempty"`
-	VideoState *wire.VideoState `json:"video_state,omitempty"`
+	Kind       string               `json:"kind,omitempty"`
+	ParentID   string               `json:"parent_id,omitempty"`
+	VideoState *contract.VideoState `json:"video_state,omitempty"`
 	// AgentID is the launcher the current attempt was assigned to.
-	AgentID   string         `json:"agent_id,omitempty"`
-	ErrorCode wire.ErrorCode `json:"error_code,omitempty"`
-	Error     string         `json:"error,omitempty"`
+	AgentID   string             `json:"agent_id,omitempty"`
+	ErrorCode contract.ErrorCode `json:"error_code,omitempty"`
+	Error     string             `json:"error,omitempty"`
 	// FinishReported is true once the agent called task_finish for the
 	// current attempt; Finish holds what it reported.
 	FinishReported bool         `json:"finish_reported"`
@@ -111,10 +111,10 @@ func (st *state) listQueues(c fiber.Ctx) error {
 // listTasks returns the tasks, newest first. ?status=FAILED,LOST and
 // ?profile=NAME filter them.
 func (st *state) listTasks(c fiber.Ctx) error {
-	var statuses []wire.Status
+	var statuses []contract.Status
 	for _, s := range strings.Split(c.Query("status"), ",") {
 		if s = strings.ToUpper(strings.TrimSpace(s)); s != "" {
-			statuses = append(statuses, wire.Status(s))
+			statuses = append(statuses, contract.Status(s))
 		}
 	}
 	profile := c.Query("profile")
@@ -156,7 +156,7 @@ func (st *state) retryTask(c fiber.Ctx) error {
 	if j == nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "no such task"})
 	}
-	if !j.Status.In(wire.RetryableFrom) {
+	if !j.Status.In(contract.RetryableFrom) {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 			"error": "task is " + string(j.Status) + "; only FAILED, CANCELLED, LOST or NEEDS_ATTENTION can be retried",
 		})
@@ -200,15 +200,15 @@ func (st *state) cancelTask(c fiber.Ctx) error {
 	if j.Status.Terminal() {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "task is already " + string(j.Status)})
 	}
-	wasQueued := j.Status == wire.StatusQueued
+	wasQueued := j.Status == contract.StatusQueued
 	j.Stop = true
-	j.Status = wire.StatusCancelled
+	j.Status = contract.StatusCancelled
 	msg := ""
 	switch {
 	case wasQueued:
 		msg = "removed from the queue"
 	case j.Holding:
-		if err := st.sendToLocked(j.AgentID, wire.MsgCancel, wire.Cancel{TaskRef: wire.TaskRef{TaskID: j.Claim.TaskID, Attempt: j.Claim.Attempt}}); err != nil {
+		if err := st.sendToLocked(j.AgentID, contract.MsgCancel, contract.Cancel{TaskRef: contract.TaskRef{TaskID: j.Claim.TaskID, Attempt: j.Claim.Attempt}}); err != nil {
 			msg = "agent not told: " + err.Error()
 			st.releaseLocked(j)
 		}

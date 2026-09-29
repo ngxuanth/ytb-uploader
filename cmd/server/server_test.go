@@ -16,8 +16,8 @@ import (
 	"github.com/fasthttp/websocket"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/taskmcp"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/wire"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/adapter/taskmcp"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/contract"
 )
 
 func TestUploadAPIAssignsAfterHello(t *testing.T) {
@@ -56,9 +56,9 @@ func TestUploadAPIAssignsAfterHello(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	hello, _ := wire.NewEnvelope(wire.MsgHello, wire.Hello{
+	hello, _ := contract.NewEnvelope(contract.MsgHello, contract.Hello{
 		AgentID: "t", Version: "test",
-		Profiles: []wire.ProfileState{{Directory: "isophtalic", Online: true}},
+		Profiles: []contract.ProfileState{{Directory: "isophtalic", Online: true}},
 	})
 	if err := conn.WriteJSON(hello); err != nil {
 		t.Fatal(err)
@@ -107,15 +107,15 @@ func TestUploadAPIAssignsAfterHello(t *testing.T) {
 		t.Fatalf("upload status %s", resp.Status)
 	}
 
-	var env wire.Envelope
+	var env contract.Envelope
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if err := conn.ReadJSON(&env); err != nil {
 		t.Fatal(err)
 	}
-	if env.Type != wire.MsgAssign {
+	if env.Type != contract.MsgAssign {
 		t.Fatalf("type %s", env.Type)
 	}
-	var assign wire.Assign
+	var assign contract.Assign
 	if err := json.Unmarshal(env.Data, &assign); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { conn.Close() })
 	h := &harness{t: t, base: base, conn: conn, video: video, data: data, st: st}
-	h.send(wire.MsgHello, wire.Hello{AgentID: "t", Profiles: []wire.ProfileState{{Directory: "isophtalic", Online: true}}})
+	h.send(contract.MsgHello, contract.Hello{AgentID: "t", Profiles: []contract.ProfileState{{Directory: "isophtalic", Online: true}}})
 	for i := 0; ; i++ {
 		var ag struct {
 			Connected bool `json:"connected"`
@@ -262,7 +262,7 @@ func newHarness(t *testing.T) *harness {
 
 func (h *harness) send(typ string, data any) {
 	h.t.Helper()
-	env, _ := wire.NewEnvelope(typ, data)
+	env, _ := contract.NewEnvelope(typ, data)
 	if err := h.conn.WriteJSON(env); err != nil {
 		h.t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func (h *harness) send(typ string, data any) {
 // expect reads the next message from the server and checks its type.
 func (h *harness) expect(typ string, out any) {
 	h.t.Helper()
-	var env wire.Envelope
+	var env contract.Envelope
 	_ = h.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if err := h.conn.ReadJSON(&env); err != nil {
 		h.t.Fatal(err)
@@ -317,7 +317,7 @@ func (h *harness) task(id string) taskView {
 }
 
 // call invokes one task_mcp / report_mcp tool with the assignment's token.
-func (h *harness) call(ep wire.MCPEndpoint, tool string, args map[string]any) map[string]any {
+func (h *harness) call(ep contract.MCPEndpoint, tool string, args map[string]any) map[string]any {
 	h.t.Helper()
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "1"}, nil).Connect(context.Background(), &mcp.StreamableClientTransport{
 		Endpoint: ep.URL, HTTPClient: &http.Client{Transport: bearer(ep.Token)},
@@ -347,11 +347,11 @@ func events(v taskView) []string {
 func TestUploadWithoutChannelUsesProfileDefault(t *testing.T) {
 	h := newHarness(t)
 	created := h.post("/uploads", uploadIn{Profile: "isophtalic", Video: h.video, Title: "Title"}, http.StatusAccepted)
-	if created.Status != wire.StatusAssigned || created.Channel != "" {
+	if created.Status != contract.StatusAssigned || created.Channel != "" {
 		t.Fatalf("created: %+v", created)
 	}
-	var assign wire.Assign
-	h.expect(wire.MsgAssign, &assign)
+	var assign contract.Assign
+	h.expect(contract.MsgAssign, &assign)
 	claim := h.call(assign.TaskMCP, "task_claim", map[string]any{})
 	if claim["channel_id"] != nil || claim["profile_directory"] != "isophtalic" {
 		t.Fatalf("claim: %v", claim)
@@ -361,15 +361,15 @@ func TestUploadWithoutChannelUsesProfileDefault(t *testing.T) {
 func TestTaskLifecycleIsTrackedFromReportMCP(t *testing.T) {
 	h := newHarness(t)
 	created := h.post("/uploads", uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video, Title: "Title"}, http.StatusAccepted)
-	if created.Status != wire.StatusAssigned || created.TaskID == "" {
+	if created.Status != contract.StatusAssigned || created.TaskID == "" {
 		t.Fatalf("created: %+v", created)
 	}
-	var assign wire.Assign
-	h.expect(wire.MsgAssign, &assign)
+	var assign contract.Assign
+	h.expect(contract.MsgAssign, &assign)
 
 	h.call(assign.TaskMCP, "task_claim", map[string]any{})
 	h.call(assign.ReportMCP, "task_report", map[string]any{"task_id": created.TaskID, "step": "UPLOADING", "progress": 40, "message": "uploading"})
-	if v := h.task(created.TaskID); v.Status != wire.StatusUploading || v.Progress != 40 || v.FinishReported {
+	if v := h.task(created.TaskID); v.Status != contract.StatusUploading || v.Progress != 40 || v.FinishReported {
 		t.Fatalf("while uploading: %+v", v)
 	}
 	h.call(assign.ReportMCP, "task_video_created", map[string]any{"task_id": created.TaskID, "video_id": "abcdefghijk"})
@@ -378,7 +378,7 @@ func TestTaskLifecycleIsTrackedFromReportMCP(t *testing.T) {
 		t.Fatalf("finish ack: %v", ack)
 	}
 	v := h.task(created.TaskID)
-	if v.Status != wire.StatusDone || !v.FinishReported || v.Finish.Status != "done" || v.VideoID != "abcdefghijk" || v.VideoURL != "https://youtu.be/abcdefghijk" {
+	if v.Status != contract.StatusDone || !v.FinishReported || v.Finish.Status != "done" || v.VideoID != "abcdefghijk" || v.VideoURL != "https://youtu.be/abcdefghijk" {
 		t.Fatalf("after finish: %+v", v)
 	}
 	want := "queued assigned task_claim task_report task_video_created task_finish"
@@ -403,13 +403,13 @@ func TestTaskLifecycleIsTrackedFromReportMCP(t *testing.T) {
 func TestSessionEndWithoutFinishIsLostAndRetryReusesVideo(t *testing.T) {
 	h := newHarness(t)
 	created := h.post("/uploads", uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video}, http.StatusAccepted)
-	var assign wire.Assign
-	h.expect(wire.MsgAssign, &assign)
+	var assign contract.Assign
+	h.expect(contract.MsgAssign, &assign)
 	h.call(assign.TaskMCP, "task_claim", map[string]any{})
 	h.call(assign.ReportMCP, "task_video_created", map[string]any{"task_id": created.TaskID, "video_id": "abcdefghijk"})
 
-	h.send(wire.MsgEvent, wire.Event{
-		TaskRef: wire.TaskRef{TaskID: created.TaskID, Attempt: 1}, Type: wire.EventSessionEnded,
+	h.send(contract.MsgEvent, contract.Event{
+		TaskRef: contract.TaskRef{TaskID: created.TaskID, Attempt: 1}, Type: contract.EventSessionEnded,
 		Data: map[string]any{"exit_code": 130, "killed_by": "timeout"}, At: time.Now(),
 	})
 	var v taskView
@@ -422,16 +422,16 @@ func TestSessionEndWithoutFinishIsLostAndRetryReusesVideo(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if v.Status != wire.StatusLost || v.FinishReported || v.ErrorCode != wire.ErrAgentLost || v.Session.ExitCode != 130 || v.Session.KilledBy != "timeout" {
+	if v.Status != contract.StatusLost || v.FinishReported || v.ErrorCode != contract.ErrAgentLost || v.Session.ExitCode != 130 || v.Session.KilledBy != "timeout" {
 		t.Fatalf("lost: %+v", v)
 	}
 
 	retried := h.post("/tasks/"+created.TaskID+"/retry", nil, http.StatusAccepted)
-	if retried.Attempt != 2 || retried.Status != wire.StatusAssigned || retried.ExistingVideoID != "abcdefghijk" || retried.SessionEnded {
+	if retried.Attempt != 2 || retried.Status != contract.StatusAssigned || retried.ExistingVideoID != "abcdefghijk" || retried.SessionEnded {
 		t.Fatalf("retried: %+v", retried)
 	}
-	var again wire.Assign
-	h.expect(wire.MsgAssign, &again)
+	var again contract.Assign
+	h.expect(contract.MsgAssign, &again)
 	if again.Task.Attempt != 2 || again.TaskMCP.Token == assign.TaskMCP.Token {
 		t.Fatalf("second assign: %+v", again)
 	}
@@ -441,11 +441,11 @@ func TestSessionEndWithoutFinishIsLostAndRetryReusesVideo(t *testing.T) {
 	}
 
 	cancelled := h.post("/tasks/"+created.TaskID+"/cancel", nil, http.StatusOK)
-	if cancelled.Status != wire.StatusCancelled {
+	if cancelled.Status != contract.StatusCancelled {
 		t.Fatalf("cancelled: %+v", cancelled)
 	}
-	var cancel wire.Cancel
-	h.expect(wire.MsgCancel, &cancel)
+	var cancel contract.Cancel
+	h.expect(contract.MsgCancel, &cancel)
 	if cancel.TaskID != created.TaskID || cancel.Attempt != 2 {
 		t.Fatalf("cancel msg: %+v", cancel)
 	}
@@ -459,7 +459,7 @@ func TestSessionEndWithoutFinishIsLostAndRetryReusesVideo(t *testing.T) {
 		t.Fatal(err)
 	}
 	j := st2.byID[created.TaskID]
-	if j == nil || j.Status != wire.StatusCancelled || j.Claim.Attempt != 2 || st2.byToken[again.TaskMCP.Token] != j {
+	if j == nil || j.Status != contract.StatusCancelled || j.Claim.Attempt != 2 || st2.byToken[again.TaskMCP.Token] != j {
 		t.Fatalf("reloaded: %+v", j)
 	}
 }
@@ -499,11 +499,11 @@ func TestSameProfileTasksRunOneAfterAnother(t *testing.T) {
 	first := h.post("/uploads", in, http.StatusAccepted)
 	second := h.post("/uploads", in, http.StatusAccepted)
 	third := h.post("/uploads", in, http.StatusAccepted)
-	if first.Status != wire.StatusAssigned || second.Status != wire.StatusQueued || second.QueuePosition != 1 || third.QueuePosition != 2 {
+	if first.Status != contract.StatusAssigned || second.Status != contract.StatusQueued || second.QueuePosition != 1 || third.QueuePosition != 2 {
 		t.Fatalf("publish: %+v / %+v / %+v", first, second, third)
 	}
-	var a1 wire.Assign
-	h.expect(wire.MsgAssign, &a1)
+	var a1 contract.Assign
+	h.expect(contract.MsgAssign, &a1)
 	if a1.Task.TaskID != first.TaskID {
 		t.Fatalf("first assign %s", a1.Task.TaskID)
 	}
@@ -513,7 +513,7 @@ func TestSameProfileTasksRunOneAfterAnother(t *testing.T) {
 	}
 
 	// Cancelling a queued task only takes it out of line.
-	if v := h.post("/tasks/"+third.TaskID+"/cancel", nil, http.StatusOK); v.Status != wire.StatusCancelled || v.QueuePosition != 0 {
+	if v := h.post("/tasks/"+third.TaskID+"/cancel", nil, http.StatusOK); v.Status != contract.StatusCancelled || v.QueuePosition != 0 {
 		t.Fatalf("cancel queued: %+v", v)
 	}
 
@@ -521,19 +521,19 @@ func TestSameProfileTasksRunOneAfterAnother(t *testing.T) {
 	// using Chrome until it exits.
 	h.call(a1.TaskMCP, "task_claim", map[string]any{})
 	h.call(a1.ReportMCP, "task_finish", map[string]any{"task_id": first.TaskID, "status": "done"})
-	if v := h.task(second.TaskID); v.Status != wire.StatusQueued || v.QueuePosition != 1 {
+	if v := h.task(second.TaskID); v.Status != contract.StatusQueued || v.QueuePosition != 1 {
 		t.Fatalf("second before session_ended: %+v", v)
 	}
-	h.send(wire.MsgEvent, wire.Event{TaskRef: wire.TaskRef{TaskID: first.TaskID, Attempt: 1}, Type: wire.EventSessionEnded, At: time.Now()})
-	var a2 wire.Assign
-	h.expect(wire.MsgAssign, &a2)
+	h.send(contract.MsgEvent, contract.Event{TaskRef: contract.TaskRef{TaskID: first.TaskID, Attempt: 1}, Type: contract.EventSessionEnded, At: time.Now()})
+	var a2 contract.Assign
+	h.expect(contract.MsgAssign, &a2)
 	if a2.Task.TaskID != second.TaskID {
 		t.Fatalf("second assign %s", a2.Task.TaskID)
 	}
-	if v := h.task(second.TaskID); v.Status != wire.StatusAssigned || v.AgentID != "t" {
+	if v := h.task(second.TaskID); v.Status != contract.StatusAssigned || v.AgentID != "t" {
 		t.Fatalf("second: %+v", v)
 	}
-	if v := h.task(first.TaskID); v.Status != wire.StatusDone || !v.SessionEnded {
+	if v := h.task(first.TaskID); v.Status != contract.StatusDone || !v.SessionEnded {
 		t.Fatalf("first: %+v", v)
 	}
 	if q := h.queues()["isophtalic"]; q.Running != second.TaskID || len(q.Queued) != 0 {
@@ -546,8 +546,8 @@ func TestQueuedUntilALauncherServesTheProfile(t *testing.T) {
 	// A second launcher that says hello without the profile makes no
 	// difference; a launcher restart (hello without the running task) frees it.
 	queued := h.post("/uploads", uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video}, http.StatusAccepted)
-	var a wire.Assign
-	h.expect(wire.MsgAssign, &a)
+	var a contract.Assign
+	h.expect(contract.MsgAssign, &a)
 	next := h.post("/uploads", uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video}, http.StatusAccepted)
 	if next.QueuePosition != 1 {
 		t.Fatalf("next: %+v", next)
@@ -555,23 +555,23 @@ func TestQueuedUntilALauncherServesTheProfile(t *testing.T) {
 
 	// The launcher reconnects without the running session: that task is
 	// lost and the next one is assigned.
-	h.send(wire.MsgHello, wire.Hello{AgentID: "t", Profiles: []wire.ProfileState{{Directory: "isophtalic", Online: true}}})
-	var a2 wire.Assign
-	h.expect(wire.MsgAssign, &a2)
+	h.send(contract.MsgHello, contract.Hello{AgentID: "t", Profiles: []contract.ProfileState{{Directory: "isophtalic", Online: true}}})
+	var a2 contract.Assign
+	h.expect(contract.MsgAssign, &a2)
 	if a2.Task.TaskID != next.TaskID {
 		t.Fatalf("assigned %s, want %s", a2.Task.TaskID, next.TaskID)
 	}
 	lost := h.task(queued.TaskID)
-	if lost.Status != wire.StatusLost || lost.ErrorCode != wire.ErrAgentLost {
+	if lost.Status != contract.StatusLost || lost.ErrorCode != contract.ErrAgentLost {
 		t.Fatalf("lost: %+v", lost)
 	}
 	// A hello that still reports the running task keeps it.
-	h.send(wire.MsgHello, wire.Hello{AgentID: "t", Profiles: []wire.ProfileState{{Directory: "isophtalic", Online: true, RunningTaskID: next.TaskID}}})
-	h.waitTask(next.TaskID, func(v taskView) bool { return v.Status == wire.StatusAssigned })
+	h.send(contract.MsgHello, contract.Hello{AgentID: "t", Profiles: []contract.ProfileState{{Directory: "isophtalic", Online: true, RunningTaskID: next.TaskID}}})
+	h.waitTask(next.TaskID, func(v taskView) bool { return v.Status == contract.StatusAssigned })
 
 	// Retry to the front of the line while the profile is busy: it waits.
 	r := h.post("/tasks/"+queued.TaskID+"/retry?front=true", nil, http.StatusAccepted)
-	if r.Status != wire.StatusQueued || r.QueuePosition != 1 || r.Attempt != 2 {
+	if r.Status != contract.StatusQueued || r.QueuePosition != 1 || r.Attempt != 2 {
 		t.Fatalf("retry: %+v", r)
 	}
 	if q := h.queues()["isophtalic"]; q.Running != next.TaskID || len(q.Queued) != 1 {
@@ -615,7 +615,7 @@ func TestUploadWithoutLauncherWaitsInQueue(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if v.Status != wire.StatusQueued || v.QueuePosition != 1 {
+	if v.Status != contract.StatusQueued || v.QueuePosition != 1 {
 		t.Fatalf("queued: %+v", v)
 	}
 	if q := h.queues()["p1"]; q.Subscribed || q.Running != "" || len(q.Queued) != 1 {
@@ -627,9 +627,9 @@ func TestUploadWithoutLauncherWaitsInQueue(t *testing.T) {
 	}
 	defer conn.Close()
 	h.conn = conn
-	h.send(wire.MsgHello, wire.Hello{AgentID: "late", Profiles: []wire.ProfileState{{Directory: "p1", Online: true}}})
-	var a wire.Assign
-	h.expect(wire.MsgAssign, &a)
+	h.send(contract.MsgHello, contract.Hello{AgentID: "late", Profiles: []contract.ProfileState{{Directory: "p1", Online: true}}})
+	var a contract.Assign
+	h.expect(contract.MsgAssign, &a)
 	if a.Task.TaskID != v.TaskID {
 		t.Fatalf("assign: %+v", a)
 	}
@@ -643,26 +643,26 @@ func TestSessionStillRunningAfterFinishIsStopped(t *testing.T) {
 	in := uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video}
 	first := h.post("/uploads", in, http.StatusAccepted)
 	next := h.post("/uploads", in, http.StatusAccepted)
-	var a wire.Assign
-	h.expect(wire.MsgAssign, &a)
+	var a contract.Assign
+	h.expect(contract.MsgAssign, &a)
 	h.call(a.TaskMCP, "task_claim", map[string]any{})
 	h.call(a.ReportMCP, "task_finish", map[string]any{"task_id": first.TaskID, "status": "done"})
 
 	// The harness keeps going after "stop": the launcher is told to end it.
-	var cancel wire.Cancel
-	h.expect(wire.MsgCancel, &cancel)
+	var cancel contract.Cancel
+	h.expect(contract.MsgCancel, &cancel)
 	if cancel.TaskID != first.TaskID || cancel.Attempt != 1 {
 		t.Fatalf("cancel: %+v", cancel)
 	}
 	v := h.waitTask(first.TaskID, func(v taskView) bool { return len(v.Events) > 0 && v.LastEvent.Event == "stop_after_finish" })
-	if v.Status != wire.StatusDone {
+	if v.Status != contract.StatusDone {
 		t.Fatalf("status changed: %+v", v)
 	}
 	// The queue moves on once the launcher reports the session ended.
-	h.send(wire.MsgEvent, wire.Event{TaskRef: wire.TaskRef{TaskID: first.TaskID, Attempt: 1}, Type: wire.EventSessionEnded,
+	h.send(contract.MsgEvent, contract.Event{TaskRef: contract.TaskRef{TaskID: first.TaskID, Attempt: 1}, Type: contract.EventSessionEnded,
 		Data: map[string]any{"killed_by": "cancelled"}, At: time.Now()})
-	var a2 wire.Assign
-	h.expect(wire.MsgAssign, &a2)
+	var a2 contract.Assign
+	h.expect(contract.MsgAssign, &a2)
 	if a2.Task.TaskID != next.TaskID {
 		t.Fatalf("next assign: %s", a2.Task.TaskID)
 	}
@@ -670,10 +670,10 @@ func TestSessionStillRunningAfterFinishIsStopped(t *testing.T) {
 	// A session that exits within the grace period is left alone.
 	h.call(a2.TaskMCP, "task_claim", map[string]any{})
 	h.call(a2.ReportMCP, "task_finish", map[string]any{"task_id": next.TaskID, "status": "done"})
-	h.send(wire.MsgEvent, wire.Event{TaskRef: wire.TaskRef{TaskID: next.TaskID, Attempt: 1}, Type: wire.EventSessionEnded, At: time.Now()})
+	h.send(contract.MsgEvent, contract.Event{TaskRef: contract.TaskRef{TaskID: next.TaskID, Attempt: 1}, Type: contract.EventSessionEnded, At: time.Now()})
 	time.Sleep(300 * time.Millisecond)
 	_ = h.conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-	var env wire.Envelope
+	var env contract.Envelope
 	if err := h.conn.ReadJSON(&env); err == nil {
 		t.Fatalf("unexpected %s after a clean exit", env.Type)
 	}
@@ -685,8 +685,8 @@ func TestSessionStillRunningAfterFinishIsStopped(t *testing.T) {
 func TestScriptThenLLMClaimSeesTheCreatedVideo(t *testing.T) {
 	h := newHarness(t)
 	created := h.post("/uploads", uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video}, http.StatusAccepted)
-	var a wire.Assign
-	h.expect(wire.MsgAssign, &a)
+	var a contract.Assign
+	h.expect(contract.MsgAssign, &a)
 	// The launcher's script claims, creates the video, then an LLM takes over.
 	c := taskmcp.NewClient(a.TaskMCP.URL, a.TaskMCP.Token, a.ReportMCP.URL, a.ReportMCP.Token)
 	first, err := c.Claim(context.Background())
@@ -703,13 +703,13 @@ func TestScriptThenLLMClaimSeesTheCreatedVideo(t *testing.T) {
 	if err != nil || second.ExistingVideoID != "abcdefghijk" {
 		t.Fatalf("second claim: %+v %v", second, err)
 	}
-	h.send(wire.MsgEvent, wire.Event{TaskRef: wire.TaskRef{TaskID: created.TaskID, Attempt: 1}, Type: wire.EventSessionEnded,
+	h.send(contract.MsgEvent, contract.Event{TaskRef: contract.TaskRef{TaskID: created.TaskID, Attempt: 1}, Type: contract.EventSessionEnded,
 		Data: map[string]any{"runner": "playbook+llm", "failed_steps": []string{"title"}, "handoffs": 1}, At: time.Now()})
 	v := h.waitTask(created.TaskID, func(v taskView) bool { return v.SessionEnded })
 	if v.Session.Runner != "playbook+llm" || strings.Join(v.Session.FailedSteps, ",") != "title" || v.Session.Handoffs != 1 {
 		t.Fatalf("session: %+v", v.Session)
 	}
-	if v.Status != wire.StatusLost {
+	if v.Status != contract.StatusLost {
 		t.Fatalf("no finish means lost: %s", v.Status)
 	}
 }
@@ -720,8 +720,8 @@ func TestVideoStateAndChecks(t *testing.T) {
 	h.st.recheck = 50 * time.Millisecond
 	h.st.mu.Unlock()
 	created := h.post("/uploads", uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video, Title: "T"}, http.StatusAccepted)
-	var a wire.Assign
-	h.expect(wire.MsgAssign, &a)
+	var a contract.Assign
+	h.expect(contract.MsgAssign, &a)
 	if a.Task.Kind != taskmcp.KindUpload || a.Task.FileURL == "" {
 		t.Fatalf("upload assign: %+v", a.Task)
 	}
@@ -737,9 +737,9 @@ func TestVideoStateAndChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Right after the save Studio still processes the video.
-	if _, err := c.VideoState(ctx, taskmcp.VideoStateIn{TaskID: created.TaskID, VideoState: wire.VideoState{
+	if _, err := c.VideoState(ctx, taskmcp.VideoStateIn{TaskID: created.TaskID, VideoState: contract.VideoState{
 		VideoID: "abcdefghijk", Visibility: "private", Processing: true, Source: "after_upload",
-		Resolutions: []wire.ResolutionState{{Name: "sd", State: "processing"}},
+		Resolutions: []contract.ResolutionState{{Name: "sd", State: "processing"}},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -754,9 +754,9 @@ func TestVideoStateAndChecks(t *testing.T) {
 
 	// The automatic recheck waits in the queue until the upload's session ends.
 	time.Sleep(150 * time.Millisecond)
-	h.send(wire.MsgEvent, wire.Event{TaskRef: wire.TaskRef{TaskID: created.TaskID, Attempt: 1}, Type: wire.EventSessionEnded, At: time.Now()})
-	var ca wire.Assign
-	h.expect(wire.MsgAssign, &ca)
+	h.send(contract.MsgEvent, contract.Event{TaskRef: contract.TaskRef{TaskID: created.TaskID, Attempt: 1}, Type: contract.EventSessionEnded, At: time.Now()})
+	var ca contract.Assign
+	h.expect(contract.MsgAssign, &ca)
 	if ca.Task.Kind != taskmcp.KindCheckVideo || ca.Task.FileURL != "" || ca.Task.ExistingVideoID != "abcdefghijk" {
 		t.Fatalf("check assign: %+v", ca.Task)
 	}
@@ -765,8 +765,8 @@ func TestVideoStateAndChecks(t *testing.T) {
 	if err != nil || claim.Kind != taskmcp.KindCheckVideo || claim.ExistingVideoID != "abcdefghijk" || claim.ProfileDirectory != "isophtalic" {
 		t.Fatalf("check claim: %+v %v", claim, err)
 	}
-	if _, err := cc.VideoState(ctx, taskmcp.VideoStateIn{TaskID: ca.Task.TaskID, VideoState: wire.VideoState{
-		Visibility: "private", Source: "check", Resolutions: []wire.ResolutionState{{Name: "sd", State: "processed"}, {Name: "hd", State: "processed"}},
+	if _, err := cc.VideoState(ctx, taskmcp.VideoStateIn{TaskID: ca.Task.TaskID, VideoState: contract.VideoState{
+		Visibility: "private", Source: "check", Resolutions: []contract.ResolutionState{{Name: "sd", State: "processed"}, {Name: "hd", State: "processed"}},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -775,7 +775,7 @@ func TestVideoStateAndChecks(t *testing.T) {
 	}
 	_ = json.Unmarshal(getBody(t, h.base+"/tasks/"+created.TaskID+"/video"), &vv)
 	if vv.VideoState == nil || vv.VideoState.Processing || vv.VideoState.Source != "check" || vv.VideoState.VideoID != "abcdefghijk" ||
-		vv.Rechecks != 1 || len(vv.Checks) != 1 || vv.Checks[0].Status != wire.StatusDone || vv.Checks[0].ParentID != created.TaskID {
+		vv.Rechecks != 1 || len(vv.Checks) != 1 || vv.Checks[0].Status != contract.StatusDone || vv.Checks[0].ParentID != created.TaskID {
 		t.Fatalf("video after check: %+v", vv)
 	}
 	// The same view is reachable through the check task's id.
@@ -786,7 +786,7 @@ func TestVideoStateAndChecks(t *testing.T) {
 	}
 
 	// A requested check is queued for the profile (free now, so assigned).
-	h.send(wire.MsgEvent, wire.Event{TaskRef: wire.TaskRef{TaskID: ca.Task.TaskID, Attempt: 1}, Type: wire.EventSessionEnded, At: time.Now()})
+	h.send(contract.MsgEvent, contract.Event{TaskRef: contract.TaskRef{TaskID: ca.Task.TaskID, Attempt: 1}, Type: contract.EventSessionEnded, At: time.Now()})
 	time.Sleep(50 * time.Millisecond)
 	chk := h.post("/tasks/"+created.TaskID+"/video/check", nil, http.StatusAccepted)
 	if chk.Kind != taskmcp.KindCheckVideo || chk.ParentID != created.TaskID {

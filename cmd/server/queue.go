@@ -7,7 +7,7 @@ import (
 
 	"github.com/gofiber/contrib/v3/websocket"
 
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/wire"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/contract"
 )
 
 // Tasks are published to a queue per Chrome profile and handed out one at a
@@ -48,7 +48,7 @@ func (st *state) holderLocked(profile string) *job {
 func (st *state) queueLocked(profile string) []*job {
 	var q []*job
 	for _, j := range st.byID {
-		if j.Status == wire.StatusQueued && j.Claim.ProfileDirectory == profile {
+		if j.Status == contract.StatusQueued && j.Claim.ProfileDirectory == profile {
 			q = append(q, j)
 		}
 	}
@@ -58,7 +58,7 @@ func (st *state) queueLocked(profile string) []*job {
 
 // queuePositionLocked is 1 for the next job in line, 0 if j is not queued.
 func (st *state) queuePositionLocked(j *job) int {
-	if j.Status != wire.StatusQueued {
+	if j.Status != contract.StatusQueued {
 		return 0
 	}
 	for i, q := range st.queueLocked(j.Claim.ProfileDirectory) {
@@ -83,7 +83,7 @@ func (st *state) agentForLocked(profile string) *agentConn {
 // enqueueLocked puts j in its profile's queue, at the end or (front) ahead of
 // every waiting job.
 func (st *state) enqueueLocked(j *job, front bool) {
-	j.Status = wire.StatusQueued
+	j.Status = contract.StatusQueued
 	j.QueuedAt = time.Now()
 	if front {
 		for _, q := range st.queueLocked(j.Claim.ProfileDirectory) {
@@ -99,7 +99,7 @@ func (st *state) enqueueLocked(j *job, front bool) {
 func (st *state) dispatchLocked() {
 	profiles := map[string]bool{}
 	for _, j := range st.byID {
-		if j.Status == wire.StatusQueued {
+		if j.Status == contract.StatusQueued {
 			profiles[j.Claim.ProfileDirectory] = true
 		}
 	}
@@ -112,7 +112,7 @@ func (st *state) dispatchLocked() {
 			continue
 		}
 		j := st.queueLocked(p)[0]
-		msg, err := wire.NewEnvelope(wire.MsgAssign, st.assign(j))
+		msg, err := contract.NewEnvelope(contract.MsgAssign, st.assign(j))
 		if err == nil {
 			err = a.conn.WriteJSON(msg)
 		}
@@ -121,7 +121,7 @@ func (st *state) dispatchLocked() {
 			log.Printf("assign %s to %s: %v", j.Claim.TaskID, a.info.AgentID, err)
 			continue
 		}
-		j.Status, j.Holding, j.AgentID = wire.StatusAssigned, true, a.info.AgentID
+		j.Status, j.Holding, j.AgentID = contract.StatusAssigned, true, a.info.AgentID
 		j.addEvent(eventEntry{Event: "assigned", Message: a.info.AgentID})
 		log.Printf("assigned %s attempt %d profile %s to %s", j.Claim.TaskID, j.Claim.Attempt, p, a.info.AgentID)
 	}
@@ -137,7 +137,7 @@ func (st *state) releaseLocked(j *job) {
 // reconcileLocked runs on hello: a launcher that no longer runs a task it was
 // holding (it restarted) lost that session, so the task is LOST and the
 // profile freed.
-func (st *state) reconcileLocked(hello wire.Hello) {
+func (st *state) reconcileLocked(hello contract.Hello) {
 	running := map[string]string{}
 	for _, p := range hello.Profiles {
 		running[p.Directory] = p.RunningTaskID
@@ -151,7 +151,7 @@ func (st *state) reconcileLocked(hello wire.Hello) {
 		}
 		j.addEvent(eventEntry{Event: "session_lost", Message: "launcher " + hello.AgentID + " reconnected without this session"})
 		if j.Finish == nil && !j.Status.Terminal() {
-			j.Status, j.ErrorCode = wire.StatusLost, wire.ErrAgentLost
+			j.Status, j.ErrorCode = contract.StatusLost, contract.ErrAgentLost
 			j.Error = "launcher restarted; the session is gone"
 		}
 		j.Stop = true
@@ -174,7 +174,7 @@ func (st *state) queuesLocked(profiles []string) []queueView {
 		seen[p] = true
 	}
 	for _, j := range st.byID {
-		if j.Holding || j.Status == wire.StatusQueued {
+		if j.Holding || j.Status == contract.StatusQueued {
 			seen[j.Claim.ProfileDirectory] = true
 		}
 	}
