@@ -13,7 +13,7 @@
 ## Chạy server
 
 ```
-./server [-addr 127.0.0.1:8090] [-profiles profile] [-data data/server/tasks.json]
+./server [-addr 127.0.0.1:8090] [-profiles profile] [-data data/server/tasks.json] [-finish-grace 45s]
 ./launcher run -server ws://127.0.0.1:8090/ws
 ```
 
@@ -22,6 +22,7 @@
 | `-addr` | `127.0.0.1:8090` | địa chỉ lắng nghe |
 | `-profiles` | `profile` | thư mục Chrome user-data-dir; mỗi thư mục con có file `Preferences` là một profile hợp lệ cho `POST /uploads` |
 | `-data` | `data/server/tasks.json` | file lưu task; ghi file tạm rồi rename sau mỗi thay đổi |
+| `-finish-grace` | `45s` | sau `task_finish`, nếu phiên hermes chưa thoát trong khoảng này thì server gửi `cancel` cho launcher để dừng nó. `0` là không bao giờ |
 
 API không có xác thực và chỉ nên lắng nghe trên `127.0.0.1`. Mọi body đều là JSON. Lỗi luôn có dạng `{"error": "..."}`.
 
@@ -38,7 +39,7 @@ POST /uploads ──► hàng đợi "kenh2": []         đang chạy: t5 ──
 - **Thứ tự:** vào trước ra trước (FIFO) trong từng profile. `POST /tasks/:id/retry?front=true` chen task lên đầu hàng.
 - **Giao task:** server giao ngay khi profile rảnh và có launcher giữ profile đó. Việc kiểm tra diễn ra khi có task mới, khi launcher gửi `hello`, và mỗi khi một task giải phóng profile. Có nhiều launcher cùng giữ một profile thì server chọn launcher kết nối gần nhất.
 - **Giải phóng profile** xảy ra khi:
-  - launcher báo `session_ended`, tức phiên hermes đã thoát và Chrome đã rảnh. `task_finish` thôi thì **chưa** giải phóng, vì hermes có thể vẫn đang dùng Chrome.
+  - launcher báo `session_ended`, tức phiên hermes đã thoát và Chrome đã rảnh. `task_finish` thôi thì **chưa** giải phóng, vì hermes có thể vẫn đang dùng Chrome. Nếu phiên vẫn chạy sau `-finish-grace` (mặc định 45 giây) kể từ `task_finish`, server tự gửi `cancel` cho launcher để hàng đợi không bị kẹt. Status của task giữ nguyên.
   - launcher từ chối task (`reject`).
   - task bị cancel trong lúc launcher giữ nó không còn kết nối.
 - **Launcher mất kết nối:** task đang chạy vẫn giữ profile, vì phiên có thể còn chạy và launcher sẽ kết nối lại. Khi launcher đó gửi `hello` mà không còn báo task này là đang chạy (`running_task_id`), tức nó đã khởi động lại, task chuyển sang `LOST` và profile được giải phóng. Launcher không quay lại thì dùng `cancel` để giải phóng.
@@ -119,7 +120,7 @@ Các trường trống bị bỏ khỏi JSON, trừ `attempt`, `progress`, `queu
 | `finish_reported` | `true` khi agent đã gọi `task_finish` trong lần chạy hiện tại |
 | `finish` | nội dung `task_finish`: `status`, `error_code`, `reason`, `video_id`, `at` |
 | `session_ended` | `true` khi launcher báo phiên hermes của lần chạy hiện tại đã thoát |
-| `session` | `exit_code`, `killed_by`, `duration_ms`, `error`, `ended_at`. `killed_by` trống nếu hermes tự thoát; nếu launcher dừng nó thì là `timeout` (quá hạn task), `stalled` (lâu không có hoạt động), `cancelled` (bị cancel) hoặc `interrupted` (launcher bị dừng) |
+| `session` | `exit_code`, `killed_by`, `duration_ms`, `error`, `ended_at`. `killed_by` trống nếu hermes tự thoát; nếu launcher dừng nó thì là `timeout` (quá hạn task), `stalled` (lâu không có hoạt động) hoặc `interrupted` (task bị cancel, kể cả `stop_after_finish`, hoặc launcher bị tắt) |
 | `last_event` | dòng cuối của `events` |
 | `events` | dòng thời gian, tối đa 200 dòng cuối, gồm mọi lần chạy |
 
@@ -130,6 +131,7 @@ Các trường trống bị bỏ khỏi JSON, trừ `attempt`, `progress`, `queu
 | `queued` | task được đưa vào hàng đợi (`POST /uploads`) |
 | `assigned` | server đã giao task cho launcher (`message` = `agent_id`) |
 | `session_lost` | launcher kết nối lại mà không còn phiên của task này |
+| `stop_after_finish` | phiên vẫn chạy sau `-finish-grace` kể từ `task_finish`; server đã gửi `cancel` cho launcher |
 | `task_claim` | agent gọi `task_claim` |
 | `task_report` | agent gọi `task_report` (`step`, `progress`, `message`) |
 | `task_video_created` | agent gọi `task_video_created` (`video_id`, `message` = URL) |

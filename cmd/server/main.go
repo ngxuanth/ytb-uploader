@@ -34,6 +34,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8090", "listen address")
 	profiles := flag.String("profiles", "profile", "directory whose subfolders are Chrome profiles")
 	data := flag.String("data", "data/server/tasks.json", "JSON file the tasks are saved to")
+	grace := flag.Duration("finish-grace", 45*time.Second, "after task_finish, stop a session that has not exited within this long (0 = never)")
 	flag.Parse()
 	absProfiles, err := filepath.Abs(*profiles)
 	if err != nil {
@@ -47,6 +48,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	st.finishGrace = *grace
 	log.Printf("listening on http://%s  ws://%s/ws", *addr, *addr)
 	log.Printf("profiles are folders in %s; tasks are saved to %s", absProfiles, absData)
 	log.Fatal(st.app().Listen(*addr))
@@ -75,6 +77,9 @@ type state struct {
 	base        string
 	profilesDir string
 	store       *store
+	// finishGrace is how long a session may keep running after task_finish
+	// before the server asks its launcher to stop it (0 = never).
+	finishGrace time.Duration
 
 	mu      sync.Mutex
 	agents  map[*websocket.Conn]*agentConn
@@ -87,6 +92,7 @@ func newState(base, profilesDir, dataFile string) (*state, error) {
 		base:        strings.TrimRight(base, "/"),
 		profilesDir: profilesDir,
 		store:       &store{path: dataFile},
+		finishGrace: 45 * time.Second,
 		agents:      map[*websocket.Conn]*agentConn{},
 		byToken:     map[string]*job{},
 		byID:        map[string]*job{},
@@ -526,7 +532,33 @@ func (st *state) Finish(_ context.Context, s *taskmcp.Session, in taskmcp.Finish
 	}
 	j.Stop = true
 	st.saveLocked()
+	st.stopAfterGraceLocked(j)
 	return &taskmcp.Ack{Control: taskmcp.Stop, Message: "recorded"}, nil
+}
+
+// stopAfterGraceLocked asks the launcher to end j's session if it is still
+// running finishGrace after task_finish. Weak models keep calling tools after
+// "stop", and the profile's queue waits for session_ended.
+func (st *state) stopAfterGraceLocked(j *job) {
+	if st.finishGrace <= 0 || !j.Holding {
+		return
+	}
+	id, attempt := j.Claim.TaskID, j.Claim.Attempt
+	time.AfterFunc(st.finishGrace, func() {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		j := st.byID[id]
+		if j == nil || j.Claim.Attempt != attempt || !j.Holding || j.Session != nil {
+			return
+		}
+		msg := "session still running " + st.finishGrace.String() + " after task_finish; asked launcher to stop it"
+		if err := st.sendToLocked(j.AgentID, wire.MsgCancel, wire.Cancel{TaskRef: wire.TaskRef{TaskID: id, Attempt: attempt}}); err != nil {
+			msg = "session still running after task_finish; launcher not told: " + err.Error()
+		}
+		j.addEvent(eventEntry{Event: "stop_after_finish", Message: msg})
+		log.Printf("%s: %s", id, msg)
+		st.saveLocked()
+	})
 }
 
 func (st *state) ackLocked(j *job) *taskmcp.Ack {

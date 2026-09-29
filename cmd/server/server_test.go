@@ -634,3 +634,50 @@ func TestUploadWithoutLauncherWaitsInQueue(t *testing.T) {
 		t.Fatalf("assign: %+v", a)
 	}
 }
+
+func TestSessionStillRunningAfterFinishIsStopped(t *testing.T) {
+	h := newHarness(t)
+	h.st.mu.Lock()
+	h.st.finishGrace = 100 * time.Millisecond
+	h.st.mu.Unlock()
+	in := uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video}
+	first := h.post("/uploads", in, http.StatusAccepted)
+	next := h.post("/uploads", in, http.StatusAccepted)
+	var a wire.Assign
+	h.expect(wire.MsgAssign, &a)
+	h.call(a.TaskMCP, "task_claim", map[string]any{})
+	h.call(a.ReportMCP, "task_finish", map[string]any{"task_id": first.TaskID, "status": "done"})
+
+	// The harness keeps going after "stop": the launcher is told to end it.
+	var cancel wire.Cancel
+	h.expect(wire.MsgCancel, &cancel)
+	if cancel.TaskID != first.TaskID || cancel.Attempt != 1 {
+		t.Fatalf("cancel: %+v", cancel)
+	}
+	v := h.waitTask(first.TaskID, func(v taskView) bool { return len(v.Events) > 0 && v.LastEvent.Event == "stop_after_finish" })
+	if v.Status != wire.StatusDone {
+		t.Fatalf("status changed: %+v", v)
+	}
+	// The queue moves on once the launcher reports the session ended.
+	h.send(wire.MsgEvent, wire.Event{TaskRef: wire.TaskRef{TaskID: first.TaskID, Attempt: 1}, Type: wire.EventSessionEnded,
+		Data: map[string]any{"killed_by": "cancelled"}, At: time.Now()})
+	var a2 wire.Assign
+	h.expect(wire.MsgAssign, &a2)
+	if a2.Task.TaskID != next.TaskID {
+		t.Fatalf("next assign: %s", a2.Task.TaskID)
+	}
+
+	// A session that exits within the grace period is left alone.
+	h.call(a2.TaskMCP, "task_claim", map[string]any{})
+	h.call(a2.ReportMCP, "task_finish", map[string]any{"task_id": next.TaskID, "status": "done"})
+	h.send(wire.MsgEvent, wire.Event{TaskRef: wire.TaskRef{TaskID: next.TaskID, Attempt: 1}, Type: wire.EventSessionEnded, At: time.Now()})
+	time.Sleep(300 * time.Millisecond)
+	_ = h.conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	var env wire.Envelope
+	if err := h.conn.ReadJSON(&env); err == nil {
+		t.Fatalf("unexpected %s after a clean exit", env.Type)
+	}
+	if got := h.task(next.TaskID); got.LastEvent.Event != "session_ended" {
+		t.Fatalf("next last event: %+v", got.LastEvent)
+	}
+}
