@@ -381,7 +381,7 @@ func TestTaskLifecycleIsTrackedFromReportMCP(t *testing.T) {
 	if v.Status != wire.StatusDone || !v.FinishReported || v.Finish.Status != "done" || v.VideoID != "abcdefghijk" || v.VideoURL != "https://youtu.be/abcdefghijk" {
 		t.Fatalf("after finish: %+v", v)
 	}
-	want := "assigned task_claim task_report task_video_created task_finish"
+	want := "queued assigned task_claim task_report task_video_created task_finish"
 	if got := strings.Join(events(v), " "); got != want {
 		t.Fatalf("events %q, want %q", got, want)
 	}
@@ -461,5 +461,176 @@ func TestSessionEndWithoutFinishIsLostAndRetryReusesVideo(t *testing.T) {
 	j := st2.byID[created.TaskID]
 	if j == nil || j.Status != wire.StatusCancelled || j.Claim.Attempt != 2 || st2.byToken[again.TaskMCP.Token] != j {
 		t.Fatalf("reloaded: %+v", j)
+	}
+}
+
+func (h *harness) queues() map[string]queueView {
+	h.t.Helper()
+	var out struct {
+		Queues []queueView `json:"queues"`
+	}
+	if err := json.Unmarshal(getBody(h.t, h.base+"/queues"), &out); err != nil {
+		h.t.Fatal(err)
+	}
+	m := map[string]queueView{}
+	for _, q := range out.Queues {
+		m[q.Profile] = q
+	}
+	return m
+}
+
+func (h *harness) waitTask(id string, ok func(taskView) bool) taskView {
+	h.t.Helper()
+	for i := 0; ; i++ {
+		v := h.task(id)
+		if ok(v) {
+			return v
+		}
+		if i > 100 {
+			h.t.Fatalf("task %s: %+v", id, v)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestSameProfileTasksRunOneAfterAnother(t *testing.T) {
+	h := newHarness(t)
+	in := uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video}
+	first := h.post("/uploads", in, http.StatusAccepted)
+	second := h.post("/uploads", in, http.StatusAccepted)
+	third := h.post("/uploads", in, http.StatusAccepted)
+	if first.Status != wire.StatusAssigned || second.Status != wire.StatusQueued || second.QueuePosition != 1 || third.QueuePosition != 2 {
+		t.Fatalf("publish: %+v / %+v / %+v", first, second, third)
+	}
+	var a1 wire.Assign
+	h.expect(wire.MsgAssign, &a1)
+	if a1.Task.TaskID != first.TaskID {
+		t.Fatalf("first assign %s", a1.Task.TaskID)
+	}
+	q := h.queues()["isophtalic"]
+	if q.Running != first.TaskID || strings.Join(q.Queued, ",") != second.TaskID+","+third.TaskID || !q.Subscribed {
+		t.Fatalf("queues: %+v", q)
+	}
+
+	// Cancelling a queued task only takes it out of line.
+	if v := h.post("/tasks/"+third.TaskID+"/cancel", nil, http.StatusOK); v.Status != wire.StatusCancelled || v.QueuePosition != 0 {
+		t.Fatalf("cancel queued: %+v", v)
+	}
+
+	// task_finish alone does not free the profile: the harness may still be
+	// using Chrome until it exits.
+	h.call(a1.TaskMCP, "task_claim", map[string]any{})
+	h.call(a1.ReportMCP, "task_finish", map[string]any{"task_id": first.TaskID, "status": "done"})
+	if v := h.task(second.TaskID); v.Status != wire.StatusQueued || v.QueuePosition != 1 {
+		t.Fatalf("second before session_ended: %+v", v)
+	}
+	h.send(wire.MsgEvent, wire.Event{TaskRef: wire.TaskRef{TaskID: first.TaskID, Attempt: 1}, Type: wire.EventSessionEnded, At: time.Now()})
+	var a2 wire.Assign
+	h.expect(wire.MsgAssign, &a2)
+	if a2.Task.TaskID != second.TaskID {
+		t.Fatalf("second assign %s", a2.Task.TaskID)
+	}
+	if v := h.task(second.TaskID); v.Status != wire.StatusAssigned || v.AgentID != "t" {
+		t.Fatalf("second: %+v", v)
+	}
+	if v := h.task(first.TaskID); v.Status != wire.StatusDone || !v.SessionEnded {
+		t.Fatalf("first: %+v", v)
+	}
+	if q := h.queues()["isophtalic"]; q.Running != second.TaskID || len(q.Queued) != 0 {
+		t.Fatalf("queues after: %+v", q)
+	}
+}
+
+func TestQueuedUntilALauncherServesTheProfile(t *testing.T) {
+	h := newHarness(t)
+	// A second launcher that says hello without the profile makes no
+	// difference; a launcher restart (hello without the running task) frees it.
+	queued := h.post("/uploads", uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video}, http.StatusAccepted)
+	var a wire.Assign
+	h.expect(wire.MsgAssign, &a)
+	next := h.post("/uploads", uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video}, http.StatusAccepted)
+	if next.QueuePosition != 1 {
+		t.Fatalf("next: %+v", next)
+	}
+
+	// The launcher reconnects without the running session: that task is
+	// lost and the next one is assigned.
+	h.send(wire.MsgHello, wire.Hello{AgentID: "t", Profiles: []wire.ProfileState{{Directory: "isophtalic", Online: true}}})
+	var a2 wire.Assign
+	h.expect(wire.MsgAssign, &a2)
+	if a2.Task.TaskID != next.TaskID {
+		t.Fatalf("assigned %s, want %s", a2.Task.TaskID, next.TaskID)
+	}
+	lost := h.task(queued.TaskID)
+	if lost.Status != wire.StatusLost || lost.ErrorCode != wire.ErrAgentLost {
+		t.Fatalf("lost: %+v", lost)
+	}
+	// A hello that still reports the running task keeps it.
+	h.send(wire.MsgHello, wire.Hello{AgentID: "t", Profiles: []wire.ProfileState{{Directory: "isophtalic", Online: true, RunningTaskID: next.TaskID}}})
+	h.waitTask(next.TaskID, func(v taskView) bool { return v.Status == wire.StatusAssigned })
+
+	// Retry to the front of the line while the profile is busy: it waits.
+	r := h.post("/tasks/"+queued.TaskID+"/retry?front=true", nil, http.StatusAccepted)
+	if r.Status != wire.StatusQueued || r.QueuePosition != 1 || r.Attempt != 2 {
+		t.Fatalf("retry: %+v", r)
+	}
+	if q := h.queues()["isophtalic"]; q.Running != next.TaskID || len(q.Queued) != 1 {
+		t.Fatalf("queues: %+v", q)
+	}
+}
+
+func TestUploadWithoutLauncherWaitsInQueue(t *testing.T) {
+	dir := t.TempDir()
+	video := filepath.Join(dir, "clip.mp4")
+	_ = os.WriteFile(video, []byte("v"), 0o600)
+	profiles := filepath.Join(dir, "profile")
+	_ = os.MkdirAll(filepath.Join(profiles, "p1"), 0o700)
+	_ = os.WriteFile(filepath.Join(profiles, "p1", "Preferences"), []byte("{}"), 0o600)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := newState("http://"+ln.Addr().String(), profiles, filepath.Join(dir, "tasks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = st.app().Listener(ln) }()
+	t.Cleanup(func() { ln.Close() })
+	h := &harness{t: t, base: "http://" + ln.Addr().String()}
+	var v taskView
+	for i := 0; ; i++ {
+		raw, _ := json.Marshal(uploadIn{Profile: "p1", Channel: "UC", Video: video})
+		resp, err := http.Post(h.base+"/uploads", "application/json", bytes.NewReader(raw))
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			_ = json.Unmarshal(body, &v)
+			if resp.StatusCode != http.StatusAccepted {
+				t.Fatalf("upload: %s %s", resp.Status, body)
+			}
+			break
+		}
+		if i > 50 {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if v.Status != wire.StatusQueued || v.QueuePosition != 1 {
+		t.Fatalf("queued: %+v", v)
+	}
+	if q := h.queues()["p1"]; q.Subscribed || q.Running != "" || len(q.Queued) != 1 {
+		t.Fatalf("queues: %+v", q)
+	}
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(h.base, "http")+"/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	h.conn = conn
+	h.send(wire.MsgHello, wire.Hello{AgentID: "late", Profiles: []wire.ProfileState{{Directory: "p1", Online: true}}})
+	var a wire.Assign
+	h.expect(wire.MsgAssign, &a)
+	if a.Task.TaskID != v.TaskID {
+		t.Fatalf("assign: %+v", a)
 	}
 }

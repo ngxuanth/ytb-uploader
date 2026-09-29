@@ -1,8 +1,9 @@
 # Server API
 
-`cmd/server` nhận yêu cầu upload qua REST, giao task cho launcher qua WebSocket, và cập nhật trạng thái task mỗi khi agent (hermes) gọi `task_mcp` / `report_mcp`. Tất cả task được lưu trong một file JSON, nên khởi động lại server vẫn còn task.
+`cmd/server` nhận yêu cầu upload qua REST, xếp mỗi task vào hàng đợi của Chrome profile của nó, giao lần lượt từng task cho launcher qua WebSocket, và cập nhật trạng thái task mỗi khi agent (hermes) gọi `task_mcp` / `report_mcp`. Tất cả task được lưu trong một file JSON, nên khởi động lại server vẫn còn task.
 
 - [Chạy server](#chạy-server)
+- [Hàng đợi theo profile](#hàng-đợi-theo-profile)
 - [Vòng đời một task](#vòng-đời-một-task)
 - [Đối tượng Task](#đối-tượng-task)
 - [REST API](#rest-api)
@@ -19,22 +20,41 @@
 | Cờ | Mặc định | Ý nghĩa |
 |---|---|---|
 | `-addr` | `127.0.0.1:8090` | địa chỉ lắng nghe |
-| `-profiles` | `profile` | thư mục Chrome user-data-dir; mỗi thư mục con là một profile hợp lệ cho `POST /uploads` |
+| `-profiles` | `profile` | thư mục Chrome user-data-dir; mỗi thư mục con có file `Preferences` là một profile hợp lệ cho `POST /uploads` |
 | `-data` | `data/server/tasks.json` | file lưu task; ghi file tạm rồi rename sau mỗi thay đổi |
 
 API không có xác thực và chỉ nên lắng nghe trên `127.0.0.1`. Mọi body đều là JSON. Lỗi luôn có dạng `{"error": "..."}`.
 
+## Hàng đợi theo profile
+
+Mỗi Chrome profile là một hàng đợi (topic). Mọi task được **publish** vào hàng đợi của profile đó; launcher **subscribe** các profile nó khai báo trong `hello`. Trong một profile, mỗi lúc chỉ có **một** task chạy, vì một profile chỉ có một Chrome và một extension. Task sau chỉ được giao khi task trước đã **giải phóng** profile.
+
+```
+POST /uploads ──► hàng đợi "kenh1": [t3, t4]   đang chạy: t2 ──assign──► launcher (hello: kenh1, kenh2)
+POST /uploads ──► hàng đợi "kenh2": []         đang chạy: t5 ──assign──► launcher
+                  hàng đợi "kenh3": [t6]       chưa launcher nào giữ kenh3: t6 chờ
+```
+
+- **Thứ tự:** vào trước ra trước (FIFO) trong từng profile. `POST /tasks/:id/retry?front=true` chen task lên đầu hàng.
+- **Giao task:** server giao ngay khi profile rảnh và có launcher giữ profile đó. Việc kiểm tra diễn ra khi có task mới, khi launcher gửi `hello`, và mỗi khi một task giải phóng profile. Có nhiều launcher cùng giữ một profile thì server chọn launcher kết nối gần nhất.
+- **Giải phóng profile** xảy ra khi:
+  - launcher báo `session_ended`, tức phiên hermes đã thoát và Chrome đã rảnh. `task_finish` thôi thì **chưa** giải phóng, vì hermes có thể vẫn đang dùng Chrome.
+  - launcher từ chối task (`reject`).
+  - task bị cancel trong lúc launcher giữ nó không còn kết nối.
+- **Launcher mất kết nối:** task đang chạy vẫn giữ profile, vì phiên có thể còn chạy và launcher sẽ kết nối lại. Khi launcher đó gửi `hello` mà không còn báo task này là đang chạy (`running_task_id`), tức nó đã khởi động lại, task chuyển sang `LOST` và profile được giải phóng. Launcher không quay lại thì dùng `cancel` để giải phóng.
+- Hàng đợi được suy ra từ các task đang `QUEUED` trong `tasks.json`, nên server khởi động lại vẫn giữ nguyên hàng đợi.
+
 ## Vòng đời một task
 
 ```
-POST /uploads ─► ASSIGNED ─► PREPARING ─► ATTACHING ─► FILLING_METADATA ─► UPLOADING ─► PROCESSING ─► PUBLISHING ─► DONE
-                    │            (theo step của task_report)                                                  
-                    ├─► FAILED            task_finish status=failed, launcher từ chối, hoặc giao task thất bại
-                    ├─► NEEDS_ATTENTION   task_finish status=needs_attention (cần người: đăng nhập, sai kênh, giới hạn upload...)
-                    ├─► LOST              phiên hermes đã thoát mà chưa gọi task_finish (error_code AGENT_LOST)
-                    └─► CANCELLED         POST /tasks/:id/cancel
+POST /uploads ─► QUEUED ─► ASSIGNED ─► PREPARING ─► ATTACHING ─► FILLING_METADATA ─► UPLOADING ─► PROCESSING ─► PUBLISHING ─► DONE
+                               │            (theo step của task_report)
+                               ├─► FAILED            task_finish status=failed, launcher từ chối, hoặc giao task thất bại
+                               ├─► NEEDS_ATTENTION   task_finish status=needs_attention (cần người: đăng nhập, sai kênh, giới hạn upload...)
+                               ├─► LOST              phiên hermes thoát mà chưa gọi task_finish, hoặc launcher khởi động lại (error_code AGENT_LOST)
+                               └─► CANCELLED         POST /tasks/:id/cancel (cả khi còn QUEUED)
 
-FAILED / NEEDS_ATTENTION / LOST / CANCELLED ── POST /tasks/:id/retry ──► ASSIGNED (attempt + 1)
+FAILED / NEEDS_ATTENTION / LOST / CANCELLED ── POST /tasks/:id/retry ──► QUEUED (attempt + 1)
 ```
 
 Các trạng thái **kết thúc** là `DONE`, `FAILED`, `CANCELLED`: không thể cancel nữa. `NEEDS_ATTENTION` và `LOST` chưa kết thúc: vẫn cancel hoặc retry được.
@@ -47,8 +67,8 @@ Server cập nhật task như sau:
 | `task_report` | `step`, `message`, `progress` (chỉ khi > 0). Nếu `step` là một trong `DOWNLOADING, PREPARING, ATTACHING, FILLING_METADATA, UPLOADING, PROCESSING, PUBLISHING` thì `status` = `step` |
 | `task_video_created` | `video_id`, `video_url` (mặc định `https://youtu.be/<video_id>`) |
 | `task_finish` | ghi `finish`. `done` → `DONE`, `progress` = 100. `needs_attention` → `NEEDS_ATTENTION`. Giá trị khác → `FAILED`. `error_code`/`error` lấy từ `error_code`/`reason`. Task đã `CANCELLED` thì giữ nguyên |
-| launcher từ chối task (`reject`) | `FAILED`, `error` = lý do |
-| launcher báo phiên kết thúc (`session_ended`) | ghi `session`. Nếu chưa có `finish` và task chưa kết thúc thì `LOST`, `error_code` = `AGENT_LOST` |
+| launcher từ chối task (`reject`) | `FAILED`, `error` = lý do; giải phóng profile |
+| launcher báo phiên kết thúc (`session_ended`) | ghi `session`. Nếu chưa có `finish` và task chưa kết thúc thì `LOST`, `error_code` = `AGENT_LOST`. Giải phóng profile, task kế tiếp được giao |
 
 Sau `task_finish`, `session_ended`, `cancel` hoặc `reject`, mọi lần gọi task_* tiếp theo của lần chạy đó đều nhận `control: "stop"`. Các lần gọi này vẫn được ghi vào `events`.
 
@@ -70,6 +90,8 @@ Sau `task_finish`, `session_ended`, `cancel` hoặc `reject`, mọi lần gọi 
   "message": "Uploading 40%",
   "video_id": "KUgjqeWrT3Y",
   "video_url": "https://youtu.be/KUgjqeWrT3Y",
+  "queue_position": 0,
+  "agent_id": "ThangNX",
   "finish_reported": false,
   "session_ended": false,
   "last_event": {"event": "task_report", "attempt": 1, "step": "UPLOADING", "progress": 40, "message": "Uploading 40%", "at": "2026-09-28T17:48:02+07:00"},
@@ -79,7 +101,7 @@ Sau `task_finish`, `session_ended`, `cancel` hoặc `reject`, mọi lần gọi 
 }
 ```
 
-Các trường trống bị bỏ khỏi JSON, trừ `attempt`, `progress`, `finish_reported`, `session_ended` và các mốc thời gian. Ví dụ `finish` chỉ xuất hiện sau khi agent gọi `task_finish`, `session` chỉ xuất hiện sau khi phiên hermes thoát.
+Các trường trống bị bỏ khỏi JSON, trừ `attempt`, `progress`, `queue_position`, `finish_reported`, `session_ended` và các mốc thời gian. Ví dụ `finish` chỉ xuất hiện sau khi agent gọi `task_finish`, `session` chỉ xuất hiện sau khi phiên hermes thoát.
 
 | Trường | Ý nghĩa |
 |---|---|
@@ -91,6 +113,8 @@ Các trường trống bị bỏ khỏi JSON, trừ `attempt`, `progress`, `fini
 | `step`, `progress`, `message` | lần `task_report` gần nhất của lần chạy hiện tại |
 | `video_id`, `video_url` | video đã tạo trên YouTube; giữ lại qua các lần retry |
 | `existing_video_id` | có khi retry mà lần trước đã tạo video: agent sửa tiếp video này, không upload lại |
+| `queue_position` | vị trí trong hàng đợi của profile khi `status` = `QUEUED`: 1 là task được giao tiếp theo. Bằng 0 khi không nằm trong hàng đợi |
+| `agent_id` | launcher nhận lần chạy hiện tại |
 | `error_code`, `error` | lỗi gần nhất, ví dụ `LOGIN_REQUIRED`, `UPLOAD_LIMIT`, `STEP_FAILED`, `AGENT_LOST` |
 | `finish_reported` | `true` khi agent đã gọi `task_finish` trong lần chạy hiện tại |
 | `finish` | nội dung `task_finish`: `status`, `error_code`, `reason`, `video_id`, `at` |
@@ -103,22 +127,23 @@ Các trường trống bị bỏ khỏi JSON, trừ `attempt`, `progress`, `fini
 
 | `event` | Từ đâu |
 |---|---|
-| `assigned` | server đã giao task cho launcher |
-| `assign_failed` | gửi task cho launcher thất bại (`message` là lỗi) |
+| `queued` | task được đưa vào hàng đợi (`POST /uploads`) |
+| `assigned` | server đã giao task cho launcher (`message` = `agent_id`) |
+| `session_lost` | launcher kết nối lại mà không còn phiên của task này |
 | `task_claim` | agent gọi `task_claim` |
 | `task_report` | agent gọi `task_report` (`step`, `progress`, `message`) |
 | `task_video_created` | agent gọi `task_video_created` (`video_id`, `message` = URL) |
 | `task_finish` | agent gọi `task_finish` (`status`, `video_id`, `message` = reason) |
 | `rejected` | launcher từ chối task hoặc lỗi trước khi chạy hermes, ví dụ tải file hỏng hay profile đang bận (`message` là lý do) |
 | `session_ended` | phiên hermes đã thoát (`message` ví dụ `exit 130, killed by timeout`) |
-| `retry` | `POST /tasks/:id/retry` (`video_id` = `existing_video_id`) |
-| `cancel` | `POST /tasks/:id/cancel` (`message` có nội dung nếu không báo được cho launcher) |
+| `retry` | `POST /tasks/:id/retry`: task vào lại hàng đợi (`video_id` = `existing_video_id`) |
+| `cancel` | `POST /tasks/:id/cancel` (`message`: `removed from the queue`, hoặc `agent not told: ...` nếu không báo được cho launcher) |
 
 ## REST API
 
 ### `POST /uploads`
 
-Tạo task upload và giao ngay cho launcher đang kết nối.
+Tạo task upload và đưa vào cuối hàng đợi của `profile`. Nếu profile đang rảnh và có launcher giữ nó, task được giao ngay trong lần gọi này. Không cần launcher đang kết nối: task sẽ chờ tới khi có launcher.
 
 Body:
 
@@ -141,9 +166,25 @@ curl -XPOST 127.0.0.1:8090/uploads -H 'content-type: application/json' -d '{
 
 | Mã | Khi nào |
 |---|---|
-| `202` | đã tạo và giao task; body là task, `status` = `ASSIGNED` |
+| `202` | đã tạo task; body là task. `status` = `ASSIGNED` nếu đã được giao ngay, còn không thì `QUEUED` kèm `queue_position` |
 | `400` | thiếu trường, `visibility` sai, tên profile không hợp lệ, file video/thumbnail không đọc được. Profile không tồn tại thì trả `{"error": "unknown profile", "profiles": [...]}` |
-| `503` | `{"error": "agent is not connected"}`: chưa có launcher kết nối, task **không** được tạo. `{"error": "agent disconnected", "task": {...}}`: task đã tạo nhưng gửi đi thất bại, task ở `FAILED` và có thể retry |
+
+### `GET /queues`
+
+Hàng đợi của mọi profile trong `-profiles`, cộng các profile đang có task chạy hoặc chờ.
+
+```json
+{"queues": [
+  {"profile": "kenh1", "running": "srv-0a1b2c3d", "queued": ["srv-11111111", "srv-22222222"], "subscribed": true, "agent_id": "ThangNX"},
+  {"profile": "kenh3", "queued": ["srv-33333333"], "subscribed": false}
+]}
+```
+
+| Trường | Ý nghĩa |
+|---|---|
+| `running` | task đang giữ profile (đã giao, phiên chưa kết thúc) |
+| `queued` | task đang chờ, theo thứ tự sẽ được giao |
+| `subscribed`, `agent_id` | có launcher đang kết nối giữ profile này không, và là launcher nào |
 
 ### `GET /tasks`
 
@@ -179,20 +220,22 @@ Chạy lần mới cho task đang `FAILED`, `CANCELLED`, `LOST` hoặc `NEEDS_AT
 1. tăng `attempt` và cấp token mới, nên phiên cũ nếu còn sót lại không ghi được vào lần mới;
 2. đặt `existing_video_id` = `video_id` nếu lần trước đã tạo video, để agent mở `https://studio.youtube.com/video/<id>/edit` và làm tiếp chứ không upload lại;
 3. xoá `step`, `progress`, `message`, `error_code`, `error`, `finish`, `session` của lần trước (`events` và `video_id` vẫn giữ);
-4. giao lại task cho launcher.
+4. đưa task vào lại hàng đợi của profile: mặc định ở cuối, còn với `?front=true` thì ở đầu hàng. Profile rảnh thì task được giao ngay.
 
 Không có body. Server không tự retry: chỉ retry khi gọi API này.
 
 | Mã | Khi nào |
 |---|---|
-| `202` | đã giao lần mới; body là task, `status` = `ASSIGNED` |
+| `202` | body là task, `status` = `ASSIGNED` (đã giao ngay) hoặc `QUEUED` |
 | `404` | không có task |
-| `409` | task đang ở trạng thái không retry được (đang chạy hoặc `DONE`) |
-| `503` | launcher chưa kết nối: task giữ nguyên. Hoặc gửi thất bại: body có `task` với `status` = `FAILED` |
+| `409` | task đang ở trạng thái không retry được (đang chạy hoặc `DONE`), hoặc phiên của lần trước chưa thoát (chờ `session_ended`) |
 
 ### `POST /tasks/:id/cancel`
 
-Dừng task: đặt `status` = `CANCELLED`. Mọi lần gọi task_* tiếp theo nhận `control: "stop"`, và launcher nhận thông điệp `cancel` để dừng phiên hermes. Không có body.
+Dừng task: đặt `status` = `CANCELLED`. Không có body.
+
+- Task đang `QUEUED`: chỉ bị gỡ khỏi hàng đợi.
+- Task đang chạy: mọi lần gọi task_* tiếp theo nhận `control: "stop"`, và launcher nhận thông điệp `cancel` để dừng phiên hermes. Profile được giải phóng khi `session_ended` về, hoặc ngay lập tức nếu launcher đó không còn kết nối.
 
 | Mã | Khi nào |
 |---|---|
@@ -202,11 +245,12 @@ Dừng task: đặt `status` = `CANCELLED`. Mọi lần gọi task_* tiếp theo
 
 ### `GET /agent`
 
-Launcher có đang kết nối không.
+Các launcher đang kết nối. `agent` là launcher kết nối gần nhất, `agents` là tất cả, mới nhất trước.
 
 ```json
 {
   "connected": true,
+  "agents": [ ... ],
   "agent": {
     "agent_id": "ThangNX",
     "version": "…",
@@ -217,7 +261,7 @@ Launcher có đang kết nối không.
 }
 ```
 
-`agent` là thông tin launcher gửi trong lần `hello` gần nhất; `last_seen` cập nhật mỗi khi nhận một thông điệp (heartbeat khoảng 15 giây một lần). Khi `connected` là `false`, `agent` có thể còn giữ thông tin cũ.
+Thông tin lấy từ `hello` của mỗi launcher; `last_seen` cập nhật mỗi khi nhận một thông điệp (heartbeat khoảng 15 giây một lần). Khi `connected` là `false` thì `agent` là `null` và `agents` rỗng.
 
 ### `GET /profiles`
 

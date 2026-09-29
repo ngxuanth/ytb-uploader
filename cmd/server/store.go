@@ -25,6 +25,13 @@ type job struct {
 	ThumbName string            `json:"thumb_name,omitempty"`
 	// Stop makes every later task_* call answer control "stop".
 	Stop bool `json:"stop"`
+	// QueuedAt orders the profile's queue while Status is QUEUED.
+	QueuedAt time.Time `json:"queued_at,omitempty"`
+	// Holding is set from assignment until the profile is released
+	// (session_ended, reject, or cancel without a launcher). While set, no
+	// other task of the profile is assigned.
+	Holding bool   `json:"holding,omitempty"`
+	AgentID string `json:"agent_id,omitempty"`
 
 	Status    wire.Status    `json:"status"`
 	Step      string         `json:"step,omitempty"`

@@ -77,8 +77,7 @@ type state struct {
 	store       *store
 
 	mu      sync.Mutex
-	conn    *websocket.Conn
-	agent   *agentInfo
+	agents  map[*websocket.Conn]*agentConn
 	byToken map[string]*job
 	byID    map[string]*job
 }
@@ -88,6 +87,7 @@ func newState(base, profilesDir, dataFile string) (*state, error) {
 		base:        strings.TrimRight(base, "/"),
 		profilesDir: profilesDir,
 		store:       &store{path: dataFile},
+		agents:      map[*websocket.Conn]*agentConn{},
 		byToken:     map[string]*job{},
 		byID:        map[string]*job{},
 	}
@@ -113,16 +113,20 @@ func (st *state) saveLocked() {
 	}
 }
 
-// sendLocked writes one message to the agent. The caller holds st.mu.
-func (st *state) sendLocked(typ string, data any) error {
-	if st.conn == nil {
-		return errors.New("agent is not connected")
+// sendToLocked writes one message to the launcher with agentID. The caller
+// holds st.mu.
+func (st *state) sendToLocked(agentID, typ string, data any) error {
+	for _, a := range st.agents {
+		if a.info.AgentID != agentID {
+			continue
+		}
+		msg, err := wire.NewEnvelope(typ, data)
+		if err != nil {
+			return err
+		}
+		return a.conn.WriteJSON(msg)
 	}
-	msg, err := wire.NewEnvelope(typ, data)
-	if err != nil {
-		return err
-	}
-	return st.conn.WriteJSON(msg)
+	return errors.New("launcher " + agentID + " is not connected")
 }
 
 func (st *state) app() *fiber.App {
@@ -136,6 +140,7 @@ func (st *state) app() *fiber.App {
 	app.Get("/profiles", st.profilesHandler)
 	app.Get("/agent", st.agentHandler)
 	app.Post("/uploads", st.upload)
+	app.Get("/queues", st.listQueues)
 	app.Get("/tasks", st.listTasks)
 	app.Get("/tasks/:id", st.getTask)
 	app.Post("/tasks/:id/retry", st.retryTask)
@@ -186,28 +191,21 @@ func (st *state) upload(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "unknown profile", "profiles": known})
 	}
 
-	st.mu.Lock()
-	connected := st.conn != nil
-	st.mu.Unlock()
-	if !connected {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "agent is not connected"})
-	}
-
 	j, err := st.newJob(in)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
+	// Publish to the profile's queue; it is assigned as soon as the profile
+	// is free and a launcher serves it, which may be right now.
 	st.mu.Lock()
+	defer st.mu.Unlock()
 	st.byToken[j.Token] = j
 	st.byID[j.Claim.TaskID] = j
-	err = st.assignLocked(j)
-	view := j.view(true)
-	st.mu.Unlock()
-	if err != nil {
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "agent disconnected", "task": view})
-	}
-	log.Printf("assigned %s profile %s channel %s", j.Claim.TaskID, in.Profile, in.Channel)
-	return c.Status(fiber.StatusAccepted).JSON(view)
+	st.enqueueLocked(j, false)
+	j.addEvent(eventEntry{Event: "queued"})
+	log.Printf("queued %s profile %s channel %s", j.Claim.TaskID, in.Profile, in.Channel)
+	st.dispatchLocked()
+	return c.Status(fiber.StatusAccepted).JSON(st.viewLocked(j, true))
 }
 
 func (st *state) newJob(in uploadIn) (*job, error) {
@@ -242,21 +240,6 @@ func (st *state) newJob(in uploadIn) (*job, error) {
 	return j, nil
 }
 
-// assignLocked sends the job's current attempt to the agent and saves it.
-// On a send error the job is marked FAILED. The caller holds st.mu.
-func (st *state) assignLocked(j *job) error {
-	err := st.sendLocked(wire.MsgAssign, st.assign(j))
-	if err != nil {
-		j.Status, j.Error, j.Stop = wire.StatusFailed, "assign: "+err.Error(), true
-		j.addEvent(eventEntry{Event: "assign_failed", Message: err.Error()})
-	} else {
-		j.Status = wire.StatusAssigned
-		j.addEvent(eventEntry{Event: "assigned"})
-	}
-	st.saveLocked()
-	return err
-}
-
 func (st *state) file(c fiber.Ctx) error {
 	st.mu.Lock()
 	j := st.byID[c.Params("id")]
@@ -278,14 +261,12 @@ func (st *state) file(c fiber.Ctx) error {
 }
 
 func (st *state) ws(conn *websocket.Conn) {
-	st.mu.Lock()
-	st.conn = conn
-	st.mu.Unlock()
+	// A launcher is subscribed once its hello arrives. Closing the socket
+	// unsubscribes it; the tasks it holds keep their profile until it says
+	// hello again (see reconcileLocked) or they are cancelled.
 	defer func() {
 		st.mu.Lock()
-		if st.conn == conn {
-			st.conn = nil
-		}
+		delete(st.agents, conn)
 		st.mu.Unlock()
 		conn.Close()
 	}()
@@ -296,8 +277,8 @@ func (st *state) ws(conn *websocket.Conn) {
 			return
 		}
 		st.mu.Lock()
-		if st.agent != nil {
-			st.agent.LastSeen = time.Now()
+		if a := st.agents[conn]; a != nil {
+			a.info.LastSeen = time.Now()
 		}
 		st.mu.Unlock()
 		switch env.Type {
@@ -315,7 +296,11 @@ func (st *state) ws(conn *websocket.Conn) {
 			}
 			now := time.Now()
 			st.mu.Lock()
-			st.agent = &agentInfo{AgentID: hello.AgentID, Version: hello.Version, Profiles: hello.Profiles, ConnectedAt: now, LastSeen: now}
+			st.agents[conn] = &agentConn{conn: conn, info: agentInfo{
+				AgentID: hello.AgentID, Version: hello.Version, Profiles: hello.Profiles, ConnectedAt: now, LastSeen: now,
+			}}
+			st.reconcileLocked(hello)
+			st.dispatchLocked()
 			st.mu.Unlock()
 			log.Printf("agent %s profiles: %s", hello.AgentID, strings.Join(dirs, ", "))
 		case wire.MsgReject:
@@ -365,7 +350,8 @@ func (st *state) onReject(rej wire.Reject) {
 	if !j.Status.Terminal() {
 		j.Status, j.Error, j.Stop = wire.StatusFailed, rej.Reason, true
 	}
-	st.saveLocked()
+	st.releaseLocked(j)
+	st.dispatchLocked()
 }
 
 func (st *state) onSessionEnded(ev wire.Event) {
@@ -403,7 +389,10 @@ func (st *state) onSessionEnded(ev wire.Event) {
 	}
 	j.Stop = true
 	log.Printf("session ended %s attempt %d: %s, finish_reported=%v", j.Claim.TaskID, j.Claim.Attempt, msg, j.Finish != nil)
-	st.saveLocked()
+	// Chrome and the tab are free only now, so this is what lets the
+	// profile's next task start.
+	st.releaseLocked(j)
+	st.dispatchLocked()
 }
 
 func (st *state) assign(j *job) wire.Assign {
