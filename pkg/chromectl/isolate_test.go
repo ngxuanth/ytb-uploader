@@ -62,3 +62,39 @@ func TestIsolatedGivesEachProfileItsOwnDirectory(t *testing.T) {
 		t.Fatalf("second isolate = %s port %d", again.UserDataDir, again.DebugPort)
 	}
 }
+
+func TestEnsureLinkMovesAReplacedFolderAside(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "profile", "p1")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "ports", "p1")
+	// What Chrome leaves behind: a real profile folder where the link was.
+	if err := os.MkdirAll(link, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(link, "Preferences"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureLink(link, target); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.Readlink(link); err != nil || !samePath(got, target) {
+		t.Fatalf("link: %q %v", got, err)
+	}
+	aside, _ := filepath.Glob(link + ".broken-*")
+	if len(aside) != 1 {
+		t.Fatalf("moved aside: %v", aside)
+	}
+	if _, err := os.Stat(filepath.Join(aside[0], "Preferences")); err != nil {
+		t.Fatal(err)
+	}
+	// A correct link is left alone.
+	if err := ensureLink(link, target); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := filepath.Glob(link + ".broken-*"); len(again) != 1 {
+		t.Fatalf("second call moved again: %v", again)
+	}
+}

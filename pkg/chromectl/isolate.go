@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Isolated returns a controller that opens this profile in its own Chrome
@@ -64,6 +65,10 @@ func (c *Controller) isolate(profile string) (string, error) {
 	return root, nil
 }
 
+// ensureLink makes link a link to target. The isolated directory is ours, so
+// anything else found there is moved aside rather than refused: Chrome
+// replaces the link with a fresh profile folder when it opens a profile that
+// another Chrome holds, and every later task of the profile would fail.
 func ensureLink(link, target string) error {
 	target, err := filepath.Abs(target)
 	if err != nil {
@@ -72,16 +77,14 @@ func ensureLink(link, target string) error {
 	_, lerr := os.Lstat(link)
 	if lerr == nil {
 		got, rerr := os.Readlink(link)
-		if rerr != nil {
-			return fmt.Errorf("%s exists and is not a link to the profile", link)
+		if rerr == nil && samePath(strings.TrimPrefix(got, `\??\`), target) {
+			return nil
 		}
-		got = strings.TrimPrefix(got, `\??\`)
-		if !samePath(got, target) {
-			return fmt.Errorf("%s points at %s, want %s", link, got, target)
+		aside := link + ".broken-" + time.Now().Format("20060102-150405")
+		if err := os.Rename(link, aside); err != nil {
+			return fmt.Errorf("%s is not a link to the profile and cannot be moved aside: %w", link, err)
 		}
-		return nil
-	}
-	if !os.IsNotExist(lerr) {
+	} else if !os.IsNotExist(lerr) {
 		return lerr
 	}
 	return linkDir(link, target)

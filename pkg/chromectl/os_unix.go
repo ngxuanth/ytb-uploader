@@ -31,7 +31,6 @@ func chromeSysProcAttr() *syscall.SysProcAttr {
 func (c *Controller) chromePIDs() []int {
 	var out []int
 	ents, _ := os.ReadDir("/proc")
-	flag := "--user-data-dir=" + c.UserDataDir
 	for _, e := range ents {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil {
@@ -41,24 +40,60 @@ func (c *Controller) chromePIDs() []int {
 		if err != nil {
 			continue
 		}
-		args := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
-		if len(args) == 0 || !strings.Contains(filepath.Base(args[0]), "chrom") {
-			continue
-		}
-		isBrowser, match := true, false
-		for _, a := range args[1:] {
-			if a == flag {
-				match = true
-			}
-			if strings.HasPrefix(a, "--type=") {
-				isBrowser = false
-			}
-		}
-		if match && isBrowser {
+		if isChromeBrowserFor(raw, c.UserDataDir) {
 			out = append(out, pid)
 		}
 	}
 	return out
+}
+
+// isChromeBrowserFor reports whether a /proc/<pid>/cmdline is the Chrome
+// browser process (not a --type= helper) of userDataDir. Chrome rewrites its
+// own cmdline into one space-joined string, so the NUL-separated form cannot
+// be relied on.
+func isChromeBrowserFor(raw []byte, userDataDir string) bool {
+	args := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+	var exe string
+	var flags []string
+	if len(args) == 1 {
+		exe, rest, _ := strings.Cut(args[0], " --")
+		if rest != "" {
+			rest = "--" + rest
+		}
+		flags = splitFlags(rest)
+		args = append([]string{exe}, flags...)
+	}
+	exe, flags = args[0], args[1:]
+	if !strings.Contains(filepath.Base(exe), "chrom") {
+		return false
+	}
+	want := "--user-data-dir=" + userDataDir
+	match := false
+	for _, a := range flags {
+		if strings.HasPrefix(a, "--type=") {
+			return false
+		}
+		if a == want {
+			match = true
+		}
+	}
+	return match
+}
+
+// splitFlags splits a space-joined flag string at every " --", so values
+// that contain spaces (a user-data-dir path) stay whole.
+func splitFlags(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, " --")
+	for i := 1; i < len(parts); i++ {
+		parts[i] = "--" + parts[i]
+	}
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+	return parts
 }
 
 func stopPIDs(ctx context.Context, pids []int) error {
