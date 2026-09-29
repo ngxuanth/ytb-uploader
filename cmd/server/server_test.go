@@ -17,8 +17,32 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"gitlab.volio.vn/tech/backend/yt_uploader/internal/adapter/taskmcp"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/app/taskservice"
 	"gitlab.volio.vn/tech/backend/yt_uploader/internal/contract"
 )
+
+type (
+	uploadIn  = taskservice.UploadInput
+	taskView  = taskservice.TaskView
+	queueView = taskservice.QueueView
+	videoView = taskservice.VideoView
+	agentInfo = taskservice.AgentInfo
+)
+
+// serve starts the server on ln with cfg modified by opts.
+func serve(t *testing.T, ln net.Listener, profiles, data string, opts ...func(*taskservice.Config)) *taskservice.Service {
+	t.Helper()
+	cfg := taskservice.DefaultConfig("http://" + ln.Addr().String())
+	for _, o := range opts {
+		o(&cfg)
+	}
+	app, svc, err := newApp(cfg, profiles, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = app.Listener(ln) }()
+	return svc
+}
 
 func TestUploadAPIAssignsAfterHello(t *testing.T) {
 	dir := t.TempDir()
@@ -41,11 +65,7 @@ func TestUploadAPIAssignsAfterHello(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := newState("http://"+ln.Addr().String(), profiles, filepath.Join(dir, "tasks.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = st.app().Listener(ln) }()
+	serve(t, ln, profiles, filepath.Join(dir, "tasks.json"))
 	t.Cleanup(func() { ln.Close() })
 	time.Sleep(50 * time.Millisecond)
 
@@ -196,10 +216,11 @@ type harness struct {
 	conn  *websocket.Conn
 	video string
 	data  string
-	st    *state
+	dir   string // profiles
+	svc   *taskservice.Service
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T, opts ...func(*taskservice.Config)) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	video := filepath.Join(dir, "clip.mp4")
@@ -222,11 +243,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := newState("http://"+ln.Addr().String(), profiles, data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = st.app().Listener(ln) }()
+	svc := serve(t, ln, profiles, data, opts...)
 	t.Cleanup(func() { ln.Close() })
 	base := "http://" + ln.Addr().String()
 	var conn *websocket.Conn
@@ -241,7 +258,7 @@ func newHarness(t *testing.T) *harness {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Cleanup(func() { conn.Close() })
-	h := &harness{t: t, base: base, conn: conn, video: video, data: data, st: st}
+	h := &harness{t: t, base: base, conn: conn, video: video, data: data, dir: profiles, svc: svc}
 	h.send(contract.MsgHello, contract.Hello{AgentID: "t", Profiles: []contract.ProfileState{{Directory: "isophtalic", Online: true}}})
 	for i := 0; ; i++ {
 		var ag struct {
@@ -454,13 +471,16 @@ func TestSessionEndWithoutFinishIsLostAndRetryReusesVideo(t *testing.T) {
 	}
 
 	// A restarted server reads the same tasks back.
-	st2, err := newState(h.base, h.st.profilesDir, h.data)
+	_, svc2, err := newApp(taskservice.DefaultConfig(h.base), h.dir, h.data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	j := st2.byID[created.TaskID]
-	if j == nil || j.Status != contract.StatusCancelled || j.Claim.Attempt != 2 || st2.byToken[again.TaskMCP.Token] != j {
-		t.Fatalf("reloaded: %+v", j)
+	v, err = svc2.Task(created.TaskID)
+	if err != nil || v.Status != contract.StatusCancelled || v.Attempt != 2 {
+		t.Fatalf("reloaded: %+v %v", v, err)
+	}
+	if id, err := svc2.Authenticate(again.TaskMCP.Token); err != nil || id != created.TaskID {
+		t.Fatalf("reloaded token: %q %v", id, err)
 	}
 }
 
@@ -590,11 +610,7 @@ func TestUploadWithoutLauncherWaitsInQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := newState("http://"+ln.Addr().String(), profiles, filepath.Join(dir, "tasks.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = st.app().Listener(ln) }()
+	serve(t, ln, profiles, filepath.Join(dir, "tasks.json"))
 	t.Cleanup(func() { ln.Close() })
 	h := &harness{t: t, base: "http://" + ln.Addr().String()}
 	var v taskView
@@ -636,10 +652,7 @@ func TestUploadWithoutLauncherWaitsInQueue(t *testing.T) {
 }
 
 func TestSessionStillRunningAfterFinishIsStopped(t *testing.T) {
-	h := newHarness(t)
-	h.st.mu.Lock()
-	h.st.finishGrace = 100 * time.Millisecond
-	h.st.mu.Unlock()
+	h := newHarness(t, func(c *taskservice.Config) { c.FinishGrace = 100 * time.Millisecond })
 	in := uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video}
 	first := h.post("/uploads", in, http.StatusAccepted)
 	next := h.post("/uploads", in, http.StatusAccepted)
@@ -715,10 +728,7 @@ func TestScriptThenLLMClaimSeesTheCreatedVideo(t *testing.T) {
 }
 
 func TestVideoStateAndChecks(t *testing.T) {
-	h := newHarness(t)
-	h.st.mu.Lock()
-	h.st.recheck = 50 * time.Millisecond
-	h.st.mu.Unlock()
+	h := newHarness(t, func(c *taskservice.Config) { c.Recheck = 50 * time.Millisecond })
 	created := h.post("/uploads", uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video, Title: "T"}, http.StatusAccepted)
 	var a contract.Assign
 	h.expect(contract.MsgAssign, &a)
