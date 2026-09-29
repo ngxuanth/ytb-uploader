@@ -22,7 +22,6 @@ import (
 
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/chromectl"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/harness"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/prompt"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/session"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/wire"
 )
@@ -45,6 +44,8 @@ func runAgent(args []string) error {
 	debugPort := fs.Int("debug-port", 9222, "Chrome remote debugging port")
 	extDir := fs.String("extension", defaultExtensionDir(), "unpacked Browser MCP extension directory")
 	chromeBin := fs.String("chrome-bin", "google-chrome", "Chrome binary")
+	runner := fs.String("runner", runnerPlaybook, "playbook: script first, LLM only for failed steps; llm: an LLM session does every task")
+	failAt := fs.String("playbook-fail-at", "", "testing: make this playbook step fail once to exercise the LLM hand-over")
 	_ = fs.Parse(args)
 	if *serverURL == "" {
 		fs.Usage()
@@ -76,7 +77,7 @@ func runAgent(args []string) error {
 	}
 	a := &agent{
 		url: *serverURL, id: id, spec: spec, bmcp: *bmcp, launcher: self,
-		work: absWork, timeout: *timeout,
+		work: absWork, timeout: *timeout, runner: *runner, failAt: *failAt,
 		chrome:  &chromectl.Controller{Bin: *chromeBin, UserDataDir: absUDD, DebugPort: *debugPort, ExtensionDir: absExt},
 		running: map[string]*runningTask{},
 	}
@@ -95,6 +96,7 @@ type agent struct {
 	url, id, bmcp, launcher, work string
 	spec                          harness.Spec
 	timeout                       time.Duration
+	runner, failAt                string
 	chrome                        *chromectl.Controller
 
 	mu      sync.Mutex
@@ -311,31 +313,29 @@ func (a *agent) execute(ctx context.Context, cancel context.CancelFunc, msg wire
 		a.fail(task, err)
 		return
 	}
-	logf("task %s profile %s bmcp %d debug %d", task.TaskID, task.ProfileDirectory, port, chrome.DebugPort)
-	out, err := session.Run(ctx, session.Config{
-		ID: task.TaskID, Dir: sessionDir, UploadDir: uploadDir, Prompt: prompt.Upload,
-		Spec: a.spec, BMCP: a.bmcp, Port: port, Launcher: a.launcher,
-		ChromeEnv: map[string]string{
-			envChromeBin: chrome.Bin, envUserDataDir: chrome.UserDataDir,
-			envDebugPort: fmt.Sprint(chrome.DebugPort), envExtensionDir: chrome.ExtensionDir,
-			envProfileDir: task.ProfileDirectory, envWSPort: fmt.Sprint(port),
-		},
-		Task:    session.Endpoint{URL: msg.TaskMCP.URL, Token: msg.TaskMCP.Token},
-		Report:  session.Endpoint{URL: msg.ReportMCP.URL, Token: msg.ReportMCP.Token},
-		Timeout: timeout,
-		OnLine:  func(ev map[string]any) { logToolUse(ev) }, Logf: logf,
+	logf("task %s profile %s bmcp %d debug %d runner %s", task.TaskID, task.ProfileDirectory, port, chrome.DebugPort, a.runner)
+	began := time.Now()
+	sum := runUpload(ctx, uploadRun{
+		ID: task.TaskID, Profile: task.ProfileDirectory, Chrome: chrome, Port: port,
+		SessionDir: sessionDir, UploadDir: uploadDir,
+		Task:   session.Endpoint{URL: msg.TaskMCP.URL, Token: msg.TaskMCP.Token},
+		Report: session.Endpoint{URL: msg.ReportMCP.URL, Token: msg.ReportMCP.Token},
+		Spec:   a.spec, BMCP: a.bmcp, Launcher: a.launcher, Timeout: timeout,
+		Runner: a.runner, FailAt: a.failAt,
 	})
-	a.sessionEnded(task, out, err)
-	if err != nil {
-		logf("task %s: %v", task.TaskID, err)
+	sum.Out.Duration = time.Since(began)
+	a.sessionEnded(task, sum)
+	if sum.Err != nil {
+		logf("task %s: %v", task.TaskID, sum.Err)
 		return
 	}
-	logf("task %s ended: exit=%d killed_by=%q duration=%s", task.TaskID, out.ExitCode, out.KilledBy, out.Duration.Round(time.Second))
+	logf("task %s ended: runner=%s failed_steps=%v exit=%d killed_by=%q duration=%s", task.TaskID, sum.Runner, sum.FailedSteps, sum.Out.ExitCode, sum.Out.KilledBy, sum.Out.Duration.Round(time.Second))
 }
 
 // sessionEnded tells the server the harness exited, so it can tell a session
 // that called task_finish from one that stopped without it.
-func (a *agent) sessionEnded(task wire.TaskSpec, out session.Outcome, runErr error) {
+func (a *agent) sessionEnded(task wire.TaskSpec, sum uploadSummary) {
+	out, runErr := sum.Out, sum.Err
 	a.mu.Lock()
 	conn := a.conn
 	a.mu.Unlock()
@@ -344,6 +344,7 @@ func (a *agent) sessionEnded(task wire.TaskSpec, out session.Outcome, runErr err
 	}
 	data := map[string]any{
 		"exit_code": out.ExitCode, "killed_by": out.KilledBy, "duration_ms": out.Duration.Milliseconds(),
+		"runner": sum.Runner, "failed_steps": sum.FailedSteps, "handoffs": sum.Handoffs,
 	}
 	if runErr != nil {
 		data["error"] = runErr.Error()

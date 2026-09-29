@@ -64,7 +64,7 @@ Server cập nhật task như sau:
 
 | Nguồn | Thay đổi |
 |---|---|
-| `task_claim` | thêm event `task_claim` |
+| `task_claim` | thêm event `task_claim`. Nếu lần chạy này đã có `video_id`, claim trả thêm `existing_video_id`, để LLM nhận tiếp việc từ script không upload lại |
 | `task_report` | `step`, `message`, `progress` (chỉ khi > 0). Nếu `step` là một trong `DOWNLOADING, PREPARING, ATTACHING, FILLING_METADATA, UPLOADING, PROCESSING, PUBLISHING` thì `status` = `step` |
 | `task_video_created` | `video_id`, `video_url` (mặc định `https://youtu.be/<video_id>`) |
 | `task_finish` | ghi `finish`. `done` → `DONE`, `progress` = 100. `needs_attention` → `NEEDS_ATTENTION`. Giá trị khác → `FAILED`. `error_code`/`error` lấy từ `error_code`/`reason`. Task đã `CANCELLED` thì giữ nguyên |
@@ -120,7 +120,7 @@ Các trường trống bị bỏ khỏi JSON, trừ `attempt`, `progress`, `queu
 | `finish_reported` | `true` khi agent đã gọi `task_finish` trong lần chạy hiện tại |
 | `finish` | nội dung `task_finish`: `status`, `error_code`, `reason`, `video_id`, `at` |
 | `session_ended` | `true` khi launcher báo phiên hermes của lần chạy hiện tại đã thoát |
-| `session` | `exit_code`, `killed_by`, `duration_ms`, `error`, `ended_at`. `killed_by` trống nếu hermes tự thoát; nếu launcher dừng nó thì là `timeout` (quá hạn task), `stalled` (lâu không có hoạt động) hoặc `interrupted` (task bị cancel, kể cả `stop_after_finish`, hoặc launcher bị tắt) |
+| `session` | `exit_code`, `killed_by`, `duration_ms`, `error`, `ended_at`, `runner` (`playbook`: script làm hết; `playbook+llm`: script chuyển một số bước cho LLM; `llm`: phiên LLM làm cả task), `failed_steps` (các bước script đã chuyển cho LLM, theo thứ tự), `handoffs`. `killed_by` trống nếu hermes tự thoát; nếu launcher dừng nó thì là `timeout` (quá hạn task), `stalled` (lâu không có hoạt động) hoặc `interrupted` (task bị cancel, kể cả `stop_after_finish`, hoặc launcher bị tắt) |
 | `last_event` | dòng cuối của `events` |
 | `events` | dòng thời gian, tối đa 200 dòng cuối, gồm mọi lần chạy |
 
@@ -133,7 +133,7 @@ Các trường trống bị bỏ khỏi JSON, trừ `attempt`, `progress`, `queu
 | `session_lost` | launcher kết nối lại mà không còn phiên của task này |
 | `stop_after_finish` | phiên vẫn chạy sau `-finish-grace` kể từ `task_finish`; server đã gửi `cancel` cho launcher |
 | `task_claim` | agent gọi `task_claim` |
-| `task_report` | agent gọi `task_report` (`step`, `progress`, `message`) |
+| `task_report` | agent hoặc script của launcher gọi `task_report` (`step`, `progress`, `message`; script ghi `message` bắt đầu bằng `[playbook]`) |
 | `task_video_created` | agent gọi `task_video_created` (`video_id`, `message` = URL) |
 | `task_finish` | agent gọi `task_finish` (`status`, `video_id`, `message` = reason) |
 | `rejected` | launcher từ chối task hoặc lỗi trước khi chạy hermes, ví dụ tải file hỏng hay profile đang bận (`message` là lý do) |

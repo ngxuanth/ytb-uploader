@@ -379,6 +379,17 @@ func (st *state) onSessionEnded(ev wire.Event) {
 	}
 	s.KilledBy, _ = ev.Data["killed_by"].(string)
 	s.Error, _ = ev.Data["error"].(string)
+	s.Runner, _ = ev.Data["runner"].(string)
+	if v, ok := ev.Data["handoffs"].(float64); ok {
+		s.Handoffs = int(v)
+	}
+	if v, ok := ev.Data["failed_steps"].([]any); ok {
+		for _, x := range v {
+			if name, ok := x.(string); ok {
+				s.FailedSteps = append(s.FailedSteps, name)
+			}
+		}
+	}
 	j.Session = s
 	msg := "exit " + itoa(s.ExitCode)
 	if s.KilledBy != "" {
@@ -455,6 +466,11 @@ func (st *state) Claim(_ context.Context, s *taskmcp.Session) (*taskmcp.ClaimOut
 	}
 	log.Printf("task_claim -> %s attempt %d", j.Claim.TaskID, j.Claim.Attempt)
 	out := *j.Claim
+	// Once the video exists, a later claim (an LLM taking over from the
+	// launcher's script) must finish that video, not upload another.
+	if out.ExistingVideoID == "" && j.VideoID != "" {
+		out.ExistingVideoID = j.VideoID
+	}
 	return &out, nil
 }
 

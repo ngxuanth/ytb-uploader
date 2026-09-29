@@ -12,7 +12,10 @@ POST /uploads ─► server ─(WebSocket)─► launcher ─► hermes ─┬�
 - **launcher** (`cmd/launcher`): kết nối tới server, tải file của task về, rồi mở một phiên agent cho mỗi task, kèm 4 MCP server của phiên đó.
 - **bmcp** (`resource/bmcp`): MCP server `browser_*` (Browser MCP đã sửa: `browser_upload_file`, `browser_evaluate`, `browser_scroll`…).
 - **extension** (`resource/browsermcp-extension`): extension Chrome "Browser MCP Local", nhận lệnh từ bmcp và thao tác trên tab.
-- **prompt** (`pkg/prompt`): các bước upload trên YouTube Studio mà agent làm theo.
+- **playbook** (`pkg/playbook`): script làm đường chính của việc upload, không dùng LLM: mở trang upload, attach file, title, description, đối tượng người xem, "Tiếp", visibility, chờ upload, Lưu. Mỗi bước kiểm tra kết quả trên trang.
+- **prompt** (`pkg/prompt`): các bước upload cho agent, cùng prompt bàn giao khi script lỗi.
+
+Mỗi task chạy playbook trước. Script lỗi ở một bước thì launcher mở một phiên LLM **chỉ cho bước đó**, kiểm tra trang qua CDP, và khi điều kiện của bước đã đạt thì dừng LLM để script chạy tiếp. Nếu LLM sửa rồi mà bước vẫn lỗi, hoặc đã phải gọi LLM 2 lần, hoặc gặp bước script chưa làm (tags, playlists, hẹn giờ), thì LLM làm nốt task. Lúc đó file đã attach được giấu đi và `task_claim` trả `existing_video_id`, nên không có video trùng. Các lỗi đã biết (`LOGIN_REQUIRED`, `WRONG_CHANNEL`, `UPLOAD_LIMIT`) thì script tự kết thúc với `needs_attention`.
 
 ## Yêu cầu
 
@@ -47,6 +50,8 @@ curl -XPOST 127.0.0.1:8090/tasks/<task_id>/retry
 ```
 
 Biến cho `start.sh`: `ADDR` (mặc định `127.0.0.1:8090`), `HARNESS` (mặc định `hermes`), `MODEL` (mặc định lấy model trong config của agent).
+
+Cờ của `launcher run` / `launcher try`: `-runner playbook` (mặc định) hoặc `-runner llm` (chỉ dùng LLM như trước); `-playbook-fail-at <bước>` cho một bước lỗi một lần, để thử việc bàn giao cho LLM (ví dụ `audience`, `visibility`). Mỗi lần LLM sửa một bước có transcript riêng ở `data/run/<task>/step-<n>-<bước>/`, còn screenshot và snapshot lúc script lỗi nằm ở `data/run/<task>/playbook-<bước>.png|.txt`.
 
 Chạy thử một lần, không cần server:
 

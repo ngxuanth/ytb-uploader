@@ -120,6 +120,12 @@ func (b *Browser) TypeSelector(ctx context.Context, selector, text string, submi
 		"browser_type_selector", map[string]any{"selector": selector, "text": text, "submit": submit}, nil)
 }
 
+// Scroll centres the element matching selector in the viewport, so a sticky
+// footer cannot cover it.
+func (b *Browser) Scroll(ctx context.Context, selector string) error {
+	return b.Call(ctx, DefaultCallTimeout, "browser_scroll", map[string]any{"selector": selector}, nil)
+}
+
 func (b *Browser) PressKey(ctx context.Context, key string) error {
 	return b.Call(ctx, DefaultCallTimeout, "browser_press_key", map[string]any{"key": key}, nil)
 }

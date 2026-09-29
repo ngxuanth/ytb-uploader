@@ -681,3 +681,35 @@ func TestSessionStillRunningAfterFinishIsStopped(t *testing.T) {
 		t.Fatalf("next last event: %+v", got.LastEvent)
 	}
 }
+
+func TestScriptThenLLMClaimSeesTheCreatedVideo(t *testing.T) {
+	h := newHarness(t)
+	created := h.post("/uploads", uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video}, http.StatusAccepted)
+	var a wire.Assign
+	h.expect(wire.MsgAssign, &a)
+	// The launcher's script claims, creates the video, then an LLM takes over.
+	c := taskmcp.NewClient(a.TaskMCP.URL, a.TaskMCP.Token, a.ReportMCP.URL, a.ReportMCP.Token)
+	first, err := c.Claim(context.Background())
+	if err != nil || first.ExistingVideoID != "" || first.TaskID != created.TaskID {
+		t.Fatalf("first claim: %+v %v", first, err)
+	}
+	if ack, err := c.Report(context.Background(), taskmcp.ReportIn{TaskID: created.TaskID, Step: "ATTACHING", Message: "[playbook] attach"}); err != nil || ack.Control != taskmcp.Continue {
+		t.Fatalf("report: %+v %v", ack, err)
+	}
+	if _, err := c.VideoCreated(context.Background(), taskmcp.VideoCreatedIn{TaskID: created.TaskID, VideoID: "abcdefghijk"}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := c.Claim(context.Background())
+	if err != nil || second.ExistingVideoID != "abcdefghijk" {
+		t.Fatalf("second claim: %+v %v", second, err)
+	}
+	h.send(wire.MsgEvent, wire.Event{TaskRef: wire.TaskRef{TaskID: created.TaskID, Attempt: 1}, Type: wire.EventSessionEnded,
+		Data: map[string]any{"runner": "playbook+llm", "failed_steps": []string{"title"}, "handoffs": 1}, At: time.Now()})
+	v := h.waitTask(created.TaskID, func(v taskView) bool { return v.SessionEnded })
+	if v.Session.Runner != "playbook+llm" || strings.Join(v.Session.FailedSteps, ",") != "title" || v.Session.Handoffs != 1 {
+		t.Fatalf("session: %+v", v.Session)
+	}
+	if v.Status != wire.StatusLost {
+		t.Fatalf("no finish means lost: %s", v.Status)
+	}
+}

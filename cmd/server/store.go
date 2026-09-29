@@ -64,6 +64,12 @@ type sessionInfo struct {
 	DurationMS int64     `json:"duration_ms"`
 	Error      string    `json:"error,omitempty"`
 	EndedAt    time.Time `json:"ended_at"`
+	// Runner is how the attempt ran: "playbook" (script only),
+	// "playbook+llm" (the script handed steps to an LLM) or "llm".
+	Runner string `json:"runner,omitempty"`
+	// FailedSteps are the script steps that were handed to an LLM, in order.
+	FailedSteps []string `json:"failed_steps,omitempty"`
+	Handoffs    int      `json:"handoffs,omitempty"`
 }
 
 // eventEntry is one line of a task's timeline: a task_mcp / report_mcp call

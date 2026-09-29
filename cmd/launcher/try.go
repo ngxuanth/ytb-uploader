@@ -21,7 +21,6 @@ import (
 
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/chromectl"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/harness"
-	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/prompt"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/session"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/taskmcp"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/wire"
@@ -55,6 +54,8 @@ func try(args []string) error {
 	debugPort := fs.Int("debug-port", 9222, "Chrome remote debugging port")
 	extDir := fs.String("extension", defaultExtensionDir(), "unpacked Browser MCP extension directory")
 	chromeBin := fs.String("chrome-bin", "google-chrome", "Chrome binary")
+	runner := fs.String("runner", runnerPlaybook, "playbook: script first, LLM only for failed steps; llm: LLM session only")
+	failAt := fs.String("playbook-fail-at", "", "testing: make this playbook step fail once to exercise the LLM hand-over")
 	_ = fs.Parse(args)
 
 	if *video == "" || *profile == "" {
@@ -146,22 +147,21 @@ func try(args []string) error {
 	if err != nil {
 		return err
 	}
-	out, err := session.Run(ctx, session.Config{
-		ID: sessionID, Dir: sessionDir, UploadDir: uploadDir, Prompt: prompt.Upload,
-		Spec: spec, BMCP: *bmcp, Port: *port, Launcher: self,
-		ChromeEnv: map[string]string{
-			envChromeBin: chrome.Bin, envUserDataDir: chrome.UserDataDir, envDebugPort: fmt.Sprint(chrome.DebugPort),
-			envExtensionDir: chrome.ExtensionDir, envProfileDir: *profile, envWSPort: fmt.Sprint(*port),
-		},
-		Task:    session.Endpoint{URL: "http://" + taskLn.Addr().String() + "/mcp", Token: be.token},
-		Report:  session.Endpoint{URL: "http://" + reportLn.Addr().String() + "/mcp", Token: be.token},
+	sum := runUpload(ctx, uploadRun{
+		ID: sessionID, Profile: *profile, Chrome: chrome, Port: *port,
+		SessionDir: sessionDir, UploadDir: uploadDir,
+		Task:   session.Endpoint{URL: "http://" + taskLn.Addr().String() + "/mcp", Token: be.token},
+		Report: session.Endpoint{URL: "http://" + reportLn.Addr().String() + "/mcp", Token: be.token},
+		Spec:   spec, BMCP: *bmcp, Launcher: self,
 		Timeout: *timeout, Idle: *idle, IdleFor: be.idleFor,
 		Cancel: cancelC, OnCancel: be.requestStop,
-		OnLine: func(ev map[string]any) { logToolUse(ev) }, Logf: logf,
+		Runner: *runner, FailAt: *failAt,
 	})
-	if err != nil {
-		return err
+	if sum.Err != nil {
+		return sum.Err
 	}
+	out := sum.Out
+	logf("runner=%s failed_steps=%v handoffs=%d", sum.Runner, sum.FailedSteps, sum.Handoffs)
 	fin := be.finished()
 	logf("session ended: exit=%d signaled=%v killed_by=%q turns=%d cost=$%.4f duration=%s",
 		out.ExitCode, out.Signaled, out.KilledBy, out.NumTurns, out.CostUSD, out.Duration.Round(time.Second))
@@ -232,7 +232,12 @@ func (b *localBackend) Claim(context.Context, *taskmcp.Session) (*taskmcp.ClaimO
 	if c == taskmcp.Stop {
 		return &taskmcp.ClaimOut{Control: taskmcp.Stop, Message: "task cancelled"}, nil
 	}
-	return b.task, nil
+	out := *b.task
+	// An LLM taking over from the script must finish the video it created.
+	if v := b.videoID(); out.ExistingVideoID == "" && v != "" {
+		out.ExistingVideoID = v
+	}
+	return &out, nil
 }
 
 func (b *localBackend) checkTask(id string) error {
