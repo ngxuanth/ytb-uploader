@@ -32,6 +32,11 @@ type Executor interface {
 	Execute(ctx context.Context, msg contract.Assign, timeout time.Duration) (upload.Summary, error)
 }
 
+// Browsers closes a profile's Chrome.
+type Browsers interface {
+	Close(ctx context.Context, profile string) error
+}
+
 // Agent is the launcher's state.
 type Agent struct {
 	ID       string
@@ -40,11 +45,17 @@ type Agent struct {
 	Profiles func() ([]Profile, error)
 	Exec     Executor
 	Logf     func(string, ...any)
+	// Browsers and IdleClose close a profile's Chrome once no task has used
+	// it for IdleClose after the last one ended (0 or nil: never).
+	Browsers  Browsers
+	IdleClose time.Duration
 
 	mu      sync.Mutex
 	conn    Sender
 	drain   bool
-	running map[string]*runningTask // by profile
+	running map[string]*runningTask  // by profile
+	idle    map[string]*time.Timer   // profile -> pending close
+	closing map[string]chan struct{} // profile -> closed when its Chrome is down
 }
 
 type runningTask struct {
@@ -164,9 +175,24 @@ func (a *Agent) Reserve(ctx context.Context, msg contract.Assign) string {
 	}
 	sessCtx, cancel := context.WithCancel(ctx)
 	a.running[task.ProfileDirectory] = &runningTask{taskID: task.TaskID, attempt: task.Attempt, cancel: cancel}
+	// The profile is in use again: keep its Chrome.
+	if t, ok := a.idle[task.ProfileDirectory]; ok {
+		t.Stop()
+		delete(a.idle, task.ProfileDirectory)
+	}
+	closing := a.closing[task.ProfileDirectory]
 	a.mu.Unlock()
 
-	go a.execute(sessCtx, cancel, msg)
+	go func() {
+		if closing != nil {
+			// Its Chrome is being closed; open it again only once it is down.
+			select {
+			case <-closing:
+			case <-sessCtx.Done():
+			}
+		}
+		a.execute(sessCtx, cancel, msg)
+	}()
 	return ""
 }
 
@@ -238,9 +264,56 @@ func (a *Agent) send(typ string, data any) error {
 func (a *Agent) release(profile, taskID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if run, ok := a.running[profile]; ok && run.taskID == taskID {
-		delete(a.running, profile)
+	if run, ok := a.running[profile]; !ok || run.taskID != taskID {
+		return
 	}
+	delete(a.running, profile)
+	if a.Browsers == nil || a.IdleClose <= 0 {
+		return
+	}
+	if a.idle == nil {
+		a.idle = map[string]*time.Timer{}
+	}
+	if t, ok := a.idle[profile]; ok {
+		t.Stop()
+	}
+	var t *time.Timer
+	t = time.AfterFunc(a.IdleClose, func() { a.closeIdle(profile, t) })
+	a.idle[profile] = t
+}
+
+// closeIdle closes profile's Chrome if timer t is still its pending close
+// and no task took the profile meanwhile.
+func (a *Agent) closeIdle(profile string, t *time.Timer) {
+	a.mu.Lock()
+	if a.idle[profile] != t {
+		a.mu.Unlock()
+		return
+	}
+	delete(a.idle, profile)
+	if _, busy := a.running[profile]; busy {
+		a.mu.Unlock()
+		return
+	}
+	if a.closing == nil {
+		a.closing = map[string]chan struct{}{}
+	}
+	done := make(chan struct{})
+	a.closing[profile] = done
+	a.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err := a.Browsers.Close(ctx, profile)
+	cancel()
+	if err != nil {
+		a.logf("profile %s idle %s; close Chrome: %v", profile, a.IdleClose, err)
+	} else {
+		a.logf("profile %s idle %s; closed Chrome", profile, a.IdleClose)
+	}
+	a.mu.Lock()
+	delete(a.closing, profile)
+	a.mu.Unlock()
+	close(done)
 }
 
 // Cancel stops the task if it runs here.

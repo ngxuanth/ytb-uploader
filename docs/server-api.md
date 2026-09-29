@@ -43,6 +43,7 @@ POST /uploads ──► hàng đợi "kenh2": []         đang chạy: t5 ──
   - launcher báo `session_ended`, tức phiên hermes đã thoát và Chrome đã rảnh. `task_finish` thôi thì **chưa** giải phóng, vì hermes có thể vẫn đang dùng Chrome. Nếu phiên vẫn chạy sau `-finish-grace` (mặc định 45 giây) kể từ `task_finish`, server tự gửi `cancel` cho launcher để hàng đợi không bị kẹt. Status của task giữ nguyên.
   - launcher từ chối task (`reject`).
   - task bị cancel trong lúc launcher giữ nó không còn kết nối.
+- **Đóng Chrome:** sau khi profile rảnh, launcher giữ Chrome của profile thêm 20 giây (`-chrome-idle-close`) cho task kế tiếp trong hàng, rồi đóng Chrome nếu không có task nào tới.
 - **Launcher mất kết nối:** task đang chạy vẫn giữ profile, vì phiên có thể còn chạy và launcher sẽ kết nối lại. Khi launcher đó gửi `hello` mà không còn báo task này là đang chạy (`running_task_id`), tức nó đã khởi động lại, task chuyển sang `LOST` và profile được giải phóng. Launcher không quay lại thì dùng `cancel` để giải phóng.
 - Hàng đợi được suy ra từ các task đang `QUEUED` trong `tasks.json`, nên server khởi động lại vẫn giữ nguyên hàng đợi.
 

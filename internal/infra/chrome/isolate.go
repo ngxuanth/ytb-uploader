@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/chrome/cdp"
 )
 
 // Isolated returns a controller that opens this profile in its own Chrome
@@ -50,10 +52,50 @@ func (c *Controller) Isolated(ctx context.Context, profile string, port int) (*C
 	return &next, nil
 }
 
+// isolatedDir is the profile's own user-data-dir.
+func (c *Controller) isolatedDir(profile string) string {
+	return filepath.Join(filepath.Dir(c.UserDataDir), "data", "chrome-ports", profile)
+}
+
+// CloseIsolated closes the profile's own Chrome (the one Isolated opens),
+// if it runs: Browser.close over CDP so Chrome saves its session, and the
+// processes are stopped if they are still there after 10s.
+func (c *Controller) CloseIsolated(ctx context.Context, profile string) error {
+	if profile == "" || profile != filepath.Base(profile) || strings.Contains(profile, "..") {
+		return fmt.Errorf("invalid profile %q", profile)
+	}
+	// No lock: the caller never opens and closes one profile at once, and
+	// holding the shared lock would stall other profiles' Isolated.
+	own := *c
+	own.UserDataDir = c.isolatedDir(profile)
+	pids := own.chromePIDs()
+	if len(pids) == 0 {
+		return nil
+	}
+	if port := own.runningDebugPort(ctx); port > 0 {
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if conn, err := cdp.Dial(cctx, port); err == nil {
+			_ = conn.Call(cctx, "", "Browser.close", nil, nil)
+			conn.Close()
+		}
+		cancel()
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(own.chromePIDs()) > 0 {
+		if time.Now().After(deadline) {
+			return stopPIDs(ctx, own.chromePIDs())
+		}
+		if err := sleep(ctx, 300*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // isolate builds <repo>/data/chrome-ports/<profile> with a link to the real
 // profile folder and a Local State that names only that profile.
 func (c *Controller) isolate(profile string) (string, error) {
-	root := filepath.Join(filepath.Dir(c.UserDataDir), "data", "chrome-ports", profile)
+	root := c.isolatedDir(profile)
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return "", err
 	}

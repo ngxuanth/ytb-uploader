@@ -29,7 +29,15 @@ type Executor struct {
 	Logf     func(string, ...any)
 }
 
-var _ agent.Executor = (*Executor)(nil)
+var (
+	_ agent.Executor = (*Executor)(nil)
+	_ agent.Browsers = (*Executor)(nil)
+)
+
+// Close closes the profile's own Chrome.
+func (x *Executor) Close(ctx context.Context, profile string) error {
+	return x.Chrome.CloseIsolated(ctx, profile)
+}
 
 func (x *Executor) Execute(ctx context.Context, msg contract.Assign, timeout time.Duration) (upload.Summary, error) {
 	task := msg.Task

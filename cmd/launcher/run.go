@@ -37,6 +37,7 @@ func runAgent(args []string) error {
 	extDir := fs.String("extension", defaultExtensionDir(), "unpacked Browser MCP extension directory")
 	chromeBin := fs.String("chrome-bin", "google-chrome", "Chrome binary")
 	runner := fs.String("runner", upload.RunnerPlaybook, "playbook: script first, LLM only for failed steps; llm: an LLM session does every task")
+	idleClose := fs.Duration("chrome-idle-close", 20*time.Second, "close a profile's Chrome when no task has used it for this long after the last one (0 = keep it open)")
 	failAt := fs.String("playbook-fail-at", "", "testing: make this playbook step fail once to exercise the LLM hand-over")
 	_ = fs.Parse(args)
 	if *serverURL == "" {
@@ -68,6 +69,10 @@ func runAgent(args []string) error {
 		id, _ = os.Hostname()
 	}
 	ctl := &chrome.Controller{Bin: *chromeBin, UserDataDir: absUDD, DebugPort: *debugPort, ExtensionDir: absExt}
+	exec := &studioenv.Executor{
+		Chrome: ctl, Work: absWork, Spec: spec, BMCP: *bmcp, Launcher: self,
+		Runner: *runner, FailAt: *failAt, Logf: logf,
+	}
 	a := &agent.Agent{
 		ID: id, Version: agentVersion, Timeout: *timeout, Logf: logf,
 		Profiles: func() ([]agent.Profile, error) {
@@ -78,10 +83,7 @@ func runAgent(args []string) error {
 			}
 			return out, err
 		},
-		Exec: &studioenv.Executor{
-			Chrome: ctl, Work: absWork, Spec: spec, BMCP: *bmcp, Launcher: self,
-			Runner: *runner, FailAt: *failAt, Logf: logf,
-		},
+		Exec: exec, Browsers: exec, IdleClose: *idleClose,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
