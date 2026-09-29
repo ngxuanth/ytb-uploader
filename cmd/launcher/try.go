@@ -7,23 +7,24 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/adapter/localtask"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/adapter/studioenv"
 	"gitlab.volio.vn/tech/backend/yt_uploader/internal/adapter/taskmcp"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/app/upload"
 	"gitlab.volio.vn/tech/backend/yt_uploader/internal/contract"
 	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/chrome"
 	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/llm/harness"
 	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/llm/session"
+	"gitlab.volio.vn/tech/backend/yt_uploader/internal/infra/localfs"
 )
 
 // try runs one upload end to end on this machine without the server: a
@@ -54,7 +55,7 @@ func try(args []string) error {
 	debugPort := fs.Int("debug-port", 9222, "Chrome remote debugging port")
 	extDir := fs.String("extension", defaultExtensionDir(), "unpacked Browser MCP extension directory")
 	chromeBin := fs.String("chrome-bin", "google-chrome", "Chrome binary")
-	runner := fs.String("runner", runnerPlaybook, "playbook: script first, LLM only for failed steps; llm: LLM session only")
+	runner := fs.String("runner", upload.RunnerPlaybook, "playbook: script first, LLM only for failed steps; llm: LLM session only")
 	failAt := fs.String("playbook-fail-at", "", "testing: make this playbook step fail once to exercise the LLM hand-over")
 	_ = fs.Parse(args)
 
@@ -87,13 +88,13 @@ func try(args []string) error {
 	// bmcp resolves symlinks and refuses files outside its upload dir, so the
 	// file must really be inside it: hard link, or copy across filesystems.
 	videoName := "video" + filepath.Ext(*video)
-	if err := linkOrCopy(*video, filepath.Join(uploadDir, videoName)); err != nil {
+	if err := localfs.LinkOrCopy(*video, filepath.Join(uploadDir, videoName)); err != nil {
 		return err
 	}
 	thumbName := ""
 	if *thumb != "" {
 		thumbName = "thumbnail" + filepath.Ext(*thumb)
-		if err := linkOrCopy(*thumb, filepath.Join(uploadDir, thumbName)); err != nil {
+		if err := localfs.LinkOrCopy(*thumb, filepath.Join(uploadDir, thumbName)); err != nil {
 			return err
 		}
 	}
@@ -102,11 +103,11 @@ func try(args []string) error {
 		Title: *title, Description: *desc, Visibility: contract.Visibility(*visibility),
 		Tags: splitList(*tags), Playlists: splitList(*playlists),
 	}
-	be := newLocalBackend(sessionID, randHex(24), &taskmcp.ClaimOut{
+	be := localtask.NewBackend(sessionID, randHex(24), &taskmcp.ClaimOut{
 		Control: taskmcp.Continue, Kind: taskmcp.KindUpload, TaskID: "try-" + sessionID, Attempt: 1,
 		FilePath: videoName, ThumbnailPath: thumbName, ChannelID: *channel, Metadata: &meta, ProfileDirectory: *profile,
 		ExistingVideoID: *existing,
-	})
+	}, logf)
 
 	taskLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -147,225 +148,37 @@ func try(args []string) error {
 	if err != nil {
 		return err
 	}
-	sum := runUpload(ctx, uploadRun{
+	env := &studioenv.Env{
 		ID: sessionID, Profile: *profile, Chrome: ctl, Port: *port,
 		SessionDir: sessionDir, UploadDir: uploadDir,
-		Task:   session.Endpoint{URL: "http://" + taskLn.Addr().String() + "/mcp", Token: be.token},
-		Report: session.Endpoint{URL: "http://" + reportLn.Addr().String() + "/mcp", Token: be.token},
+		Task:   session.Endpoint{URL: "http://" + taskLn.Addr().String() + "/mcp", Token: be.Token()},
+		Report: session.Endpoint{URL: "http://" + reportLn.Addr().String() + "/mcp", Token: be.Token()},
 		Spec:   spec, BMCP: *bmcp, Launcher: self,
-		Timeout: max(*timeout, contract.UploadBudget(fileSize(*video))), Idle: *idle, IdleFor: be.idleFor,
-		Cancel: cancelC, OnCancel: be.requestStop,
-		Runner: *runner, FailAt: *failAt,
-	})
+		Idle: *idle, IdleFor: be.IdleFor, Cancel: cancelC, OnCancel: be.RequestStop,
+		FailAt: *failAt, Logf: logf,
+	}
+	sum := upload.Run(ctx, upload.Attempt{
+		ID: sessionID, SessionDir: sessionDir, Runner: *runner, Logf: logf,
+		Timeout: max(*timeout, contract.UploadBudget(fileSize(*video))),
+	}, env.Tasks(), env)
 	if sum.Err != nil {
 		return sum.Err
 	}
 	out := sum.Out
 	logf("runner=%s failed_steps=%v handoffs=%d", sum.Runner, sum.FailedSteps, sum.Handoffs)
-	fin := be.finished()
+	fin := be.Finished()
 	logf("session ended: exit=%d signaled=%v killed_by=%q turns=%d cost=$%.4f duration=%s",
 		out.ExitCode, out.Signaled, out.KilledBy, out.NumTurns, out.CostUSD, out.Duration.Round(time.Second))
 	switch {
 	case fin == nil:
 		logf("RESULT: no task_finish call -> would be FAILED AGENT_NO_RESULT")
 	case fin.Status == "done":
-		verified, note := verifyVideo(be.videoID(), fin.VideoID, meta.Visibility)
+		verified, note := localtask.VerifyVideo(be.VideoID(), fin.VideoID, meta.Visibility)
 		logf("RESULT: done video=%s verified=%v (%s)", fin.VideoID, verified, note)
 	default:
 		logf("RESULT: %s code=%s reason=%s", fin.Status, fin.ErrorCode, fin.Reason)
 	}
 	return nil
-}
-
-// localBackend serves exactly one task to one session.
-type localBackend struct {
-	sessionID, token string
-	task             *taskmcp.ClaimOut
-
-	mu       sync.Mutex
-	last     time.Time
-	stop     bool
-	video    string
-	finishIn *taskmcp.FinishIn
-}
-
-func newLocalBackend(sessionID, token string, task *taskmcp.ClaimOut) *localBackend {
-	return &localBackend{sessionID: sessionID, token: token, task: task, last: time.Now()}
-}
-
-func (b *localBackend) touch() taskmcp.Control {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.last = time.Now()
-	if b.stop || b.finishIn != nil {
-		return taskmcp.Stop
-	}
-	return taskmcp.Continue
-}
-
-func (b *localBackend) idleFor() time.Duration {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return time.Since(b.last)
-}
-
-func (b *localBackend) requestStop() { b.mu.Lock(); b.stop = true; b.mu.Unlock() }
-
-func (b *localBackend) videoID() string { b.mu.Lock(); defer b.mu.Unlock(); return b.video }
-
-func (b *localBackend) finished() *taskmcp.FinishIn {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.finishIn
-}
-
-func (b *localBackend) Authenticate(_ context.Context, token string) (*taskmcp.Session, error) {
-	if !taskmcp.TokenEqual(token, b.token) {
-		return nil, taskmcp.ErrUnauthorized
-	}
-	return &taskmcp.Session{ID: b.sessionID}, nil
-}
-
-func (b *localBackend) Claim(context.Context, *taskmcp.Session) (*taskmcp.ClaimOut, error) {
-	c := b.touch()
-	logf("task_claim -> %s", b.task.TaskID)
-	if c == taskmcp.Stop {
-		return &taskmcp.ClaimOut{Control: taskmcp.Stop, Message: "task cancelled"}, nil
-	}
-	out := *b.task
-	// An LLM taking over from the script must finish the video it created.
-	if v := b.videoID(); out.ExistingVideoID == "" && v != "" {
-		out.ExistingVideoID = v
-	}
-	return &out, nil
-}
-
-func (b *localBackend) checkTask(id string) error {
-	if id != b.task.TaskID {
-		return fmt.Errorf("unknown task_id %q, this session's task is %q", id, b.task.TaskID)
-	}
-	return nil
-}
-
-func (b *localBackend) Report(_ context.Context, _ *taskmcp.Session, in taskmcp.ReportIn) (*taskmcp.Ack, error) {
-	if err := b.checkTask(in.TaskID); err != nil {
-		return nil, err
-	}
-	c := b.touch()
-	logf("task_report %-16s %3d%%  %s", in.Step, in.Progress, in.Message)
-	return ack(c), nil
-}
-
-func (b *localBackend) VideoCreated(_ context.Context, _ *taskmcp.Session, in taskmcp.VideoCreatedIn) (*taskmcp.Ack, error) {
-	if err := b.checkTask(in.TaskID); err != nil {
-		return nil, err
-	}
-	c := b.touch()
-	b.mu.Lock()
-	b.video = in.VideoID
-	b.mu.Unlock()
-	logf("task_video_created %s %s", in.VideoID, in.VideoURL)
-	return ack(c), nil
-}
-
-func (b *localBackend) VideoState(_ context.Context, _ *taskmcp.Session, in taskmcp.VideoStateIn) (*taskmcp.Ack, error) {
-	if err := b.checkTask(in.TaskID); err != nil {
-		return nil, err
-	}
-	c := b.touch()
-	logf("task_video_state %s visibility=%s processing=%v restrictions=%q resolutions=%v", in.VideoID, in.Visibility, in.Processing, in.Restrictions, in.Resolutions)
-	return ack(c), nil
-}
-
-func (b *localBackend) Finish(_ context.Context, _ *taskmcp.Session, in taskmcp.FinishIn) (*taskmcp.Ack, error) {
-	if err := b.checkTask(in.TaskID); err != nil {
-		return nil, err
-	}
-	b.touch()
-	b.mu.Lock()
-	if b.finishIn == nil {
-		b.finishIn = &in
-	}
-	b.mu.Unlock()
-	logf("task_finish %s video=%s code=%s reason=%s", in.Status, in.VideoID, in.ErrorCode, in.Reason)
-	return &taskmcp.Ack{Control: taskmcp.Stop, Message: "recorded; end the session now"}, nil
-}
-
-func ack(c taskmcp.Control) *taskmcp.Ack {
-	a := &taskmcp.Ack{Control: c}
-	if c == taskmcp.Stop {
-		a.Message = "task cancelled: stop now and end the session"
-	}
-	return a
-}
-
-// verifyVideo does not trust the LLM: the id must match the one reported
-// when the video was created, and public/unlisted videos must be reachable.
-func verifyVideo(created, finished string, vis contract.Visibility) (bool, string) {
-	if finished == "" {
-		return false, "no video_id in task_finish"
-	}
-	if created != "" && created != finished {
-		return false, fmt.Sprintf("task_finish video %s differs from created video %s", finished, created)
-	}
-	if vis == contract.VisibilityPrivate {
-		return false, "private video: not publicly checkable"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	u := "https://www.youtube.com/oembed?format=json&url=" + url.QueryEscape("https://www.youtube.com/watch?v="+finished)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false, "oembed: " + err.Error()
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
-		return true, "oembed ok"
-	}
-	return false, "oembed " + resp.Status
-}
-
-func logToolUse(ev map[string]any) {
-	// Hermes stream-json: one top-level tool_use event per call.
-	if ev["type"] == "tool_use" {
-		if name, _ := ev["name"].(string); !strings.Contains(name, "task_") {
-			logf("  tool %s", name)
-		}
-		return
-	}
-	// Claude / Cursor stream-json: assistant messages carry tool_use blocks.
-	msg, _ := ev["message"].(map[string]any)
-	content, _ := msg["content"].([]any)
-	for _, c := range content {
-		block, _ := c.(map[string]any)
-		if block["type"] == "tool_use" {
-			name, _ := block["name"].(string)
-			if !strings.Contains(name, "task_") {
-				logf("  tool %s", name)
-			}
-		}
-	}
-}
-
-func linkOrCopy(src, dst string) error {
-	if err := os.Link(src, dst); err == nil {
-		return nil
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 func splitList(s string) []string {

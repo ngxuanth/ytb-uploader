@@ -60,3 +60,24 @@ func (Files) Exists(path string) error {
 	_, err := os.Stat(path)
 	return err
 }
+
+// LinkOrCopy puts src at dst: a hard link, or a copy across filesystems.
+func LinkOrCopy(src, dst string) error {
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}

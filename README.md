@@ -17,6 +17,28 @@ POST /uploads ─► server ─(WebSocket)─► launcher ─► hermes ─┬�
 
 Mỗi task chạy playbook trước. Script lỗi ở một bước thì launcher mở một phiên LLM **chỉ cho bước đó**, kiểm tra trang qua CDP, và khi điều kiện của bước đã đạt thì dừng LLM để script chạy tiếp. Nếu LLM sửa rồi mà bước vẫn lỗi, hoặc đã phải gọi LLM 2 lần, hoặc gặp bước script chưa làm (tags, playlists, hẹn giờ), thì LLM làm nốt task. Lúc đó file đã attach được giấu đi và `task_claim` trả `existing_video_id`, nên không có video trùng. Các lỗi đã biết (`LOGIN_REQUIRED`, `WRONG_CHANNEL`, `UPLOAD_LIMIT`) thì script tự kết thúc với `needs_attention`.
 
+## Cấu trúc code
+
+Code chia theo tầng (clean architecture). Tầng trong không import tầng ngoài: `domain` và `app` không import `adapter` hay `infra`.
+
+```
+cmd/server, cmd/launcher     chỉ đọc cờ và nối các tầng với nhau
+internal/contract            message WebSocket, trạng thái, mã lỗi dùng chung giữa server và launcher
+internal/domain/task         task và các luật của nó (hàng đợi theo profile, chuyển trạng thái, retry, huỷ); không I/O
+internal/app/taskservice     use case của server; I/O đi qua port (Repository, Profiles, Files, AgentConn)
+internal/app/agent           use case của launcher: nhận assign / cancel / drain, mỗi profile chỉ một task chạy
+internal/app/upload          một lần chạy task: playbook trước, LLM cho bước lỗi, LLM làm nốt khi cần (port: Tasks, Env, Script)
+internal/adapter/http        REST API (Fiber)
+internal/adapter/agentws     WebSocket phía server
+internal/adapter/agentclient WebSocket phía launcher (kết nối lại, heartbeat)
+internal/adapter/taskmcp     task_mcp / report_mcp (MCP server và client); taskmcpserver nối nó với taskservice
+internal/adapter/jsonstore   lưu task ra file JSON
+internal/adapter/studioenv   môi trường của một lần chạy: Chrome riêng của profile, playbook, phiên LLM, kiểm tra trang qua CDP
+internal/adapter/chromemcp   MCP server "chrome" cho LLM
+internal/adapter/localtask   task_mcp một task trong process, dùng cho `launcher try`
+internal/infra/...           chrome (+cdp), extension (driver), studio (playbook), llm (harness, session, prompt), localfs, download
+```
+
 ## Yêu cầu
 
 - Linux x86-64 có màn hình (X11 hoặc Wayland có XWayland). Chrome chạy với `--ozone-platform=x11`, vì trên Wayland cửa sổ bị che thì không vẽ khung hình mới và extension bị treo.
