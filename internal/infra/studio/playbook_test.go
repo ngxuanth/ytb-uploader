@@ -43,6 +43,8 @@ type fakeStudio struct {
 
 	rowVisibility string           // Visibility column in the content list
 	rowMissing    bool             // the video is not in the content list
+	short         bool             // the upload is a Short: shorts/ link, listed in the Shorts tab
+	navs          []string         // every Navigate
 	badges        []map[string]any // #video-resolutions badges on the edit page
 }
 
@@ -51,14 +53,32 @@ func newStudio(meta contract.Metadata) *fakeStudio {
 		rowVisibility: "Riêng tư", badges: []map[string]any{{"name": "sd", "label": "Đã xử lý xong độ phân giải chuẩn"}}}
 }
 
-func (f *fakeStudio) Navigate(_ context.Context, url string) error { f.url = url; return nil }
-func (f *fakeStudio) URL(context.Context) (string, error)          { return f.url, nil }
-func (f *fakeStudio) Scroll(context.Context, string) error         { return nil }
+func (f *fakeStudio) Navigate(_ context.Context, url string) error {
+	f.url = url
+	f.navs = append(f.navs, url)
+	return nil
+}
+
+// visited reports whether a navigation went to a URL ending in suffix.
+func (f *fakeStudio) visited(suffix string) bool {
+	for _, u := range f.navs {
+		if strings.HasSuffix(u, suffix) {
+			return true
+		}
+	}
+	return false
+}
+func (f *fakeStudio) URL(context.Context) (string, error)  { return f.url, nil }
+func (f *fakeStudio) Scroll(context.Context, string) error { return nil }
 
 func (f *fakeStudio) UploadFile(_ context.Context, sel, _ string) error {
 	if sel == "input[type=file]" {
 		f.uploads++
-		if f.limitText == "" {
+		switch {
+		case f.limitText != "":
+		case f.short:
+			f.link = "https://youtube.com/shorts/abcdefghijk"
+		default:
 			f.link = "https://youtu.be/abcdefghijk"
 		}
 	}
@@ -104,7 +124,7 @@ func (f *fakeStudio) Evaluate(_ context.Context, expr string, out any) error {
 	var v any
 	switch {
 	case strings.Contains(expr, ".tablecell-"):
-		if f.rowMissing {
+		if f.rowMissing || (f.short && !strings.Contains(f.url, "/videos/short")) {
 			v = map[string]any{"found": false}
 		} else {
 			v = map[string]any{"found": true, "visibility": f.rowVisibility, "restrictions": "—", "date": "29 thg 9, 2026 Ngày tải lên", "draft": false}
@@ -480,7 +500,9 @@ func TestStateIsReadAndReportedAfterUpload(t *testing.T) {
 func TestStateReadFailureDoesNotFailTheUpload(t *testing.T) {
 	f, rep := newStudio(meta), &fakeReporter{}
 	f.rowMissing = true
-	if res := newRunner(meta, rep).Run(context.Background(), f); res.Outcome != Done || len(rep.states) != 0 {
+	r := newRunner(meta, rep)
+	r.StateAfterUpload = true
+	if res := r.Run(context.Background(), f); res.Outcome != Done || len(rep.states) != 0 {
 		t.Fatalf("result %+v states %+v", res, rep.states)
 	}
 }
@@ -506,5 +528,29 @@ func TestVisibilityWords(t *testing.T) {
 		if got := normalizeVisibility(text, false); got != want {
 			t.Errorf("%q: %q, want %q", text, got, want)
 		}
+	}
+}
+
+// A vertical video becomes a Short: the dialog links youtube.com/shorts/<id>
+// and the content list shows it in the Shorts tab, not the Videos tab.
+func TestShortIsUploadedAndItsStateRead(t *testing.T) {
+	f, rep := newStudio(meta), &fakeReporter{}
+	f.short = true
+	r := newRunner(meta, rep)
+	r.StateAfterUpload = true
+	if res := r.Run(context.Background(), f); res.Outcome != Done {
+		t.Fatalf("result %+v", res)
+	}
+	if f.uploads != 1 || r.VideoID() != "abcdefghijk" {
+		t.Fatalf("uploads %d video %q", f.uploads, r.VideoID())
+	}
+	if len(rep.states) != 1 || rep.states[0].Visibility != "private" {
+		t.Fatalf("states %+v", rep.states)
+	}
+	if !strings.Contains(f.url, "/videos/short") && !strings.Contains(f.url, "/video/") {
+		t.Fatalf("last page %s", f.url)
+	}
+	if f.visited("/videos/upload") {
+		t.Fatal("looked in the Videos tab first although the dialog linked a Short")
 	}
 }

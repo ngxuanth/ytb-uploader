@@ -20,9 +20,6 @@ func (r *Runner) ReadVideoState(ctx context.Context, p Page, videoID string) (co
 	if err != nil {
 		return st, err
 	}
-	if err := r.navigate(ctx, p, "https://studio.youtube.com/channel/"+channel+"/videos/upload", "/videos"); err != nil {
-		return st, err
-	}
 	var row struct {
 		Found        bool   `json:"found"`
 		Visibility   string `json:"visibility"`
@@ -30,7 +27,7 @@ func (r *Runner) ReadVideoState(ctx context.Context, p Page, videoID string) (co
 		Date         string `json:"date"`
 		Draft        bool   `json:"draft"`
 	}
-	if err := r.poll(ctx, func() bool {
+	if err := r.inContentList(ctx, p, channel, func() bool {
 		_ = p.Evaluate(ctx, rowJS(videoID), &row)
 		return row.Found
 	}); err != nil {

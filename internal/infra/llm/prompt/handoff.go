@@ -3,6 +3,7 @@ package prompt
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // StepContext is what a scripted run tells the LLM when it hands over.
@@ -86,9 +87,14 @@ func orDefault(s, d string) string {
 	return s
 }
 
+// truncate cuts s to at most n bytes without splitting a UTF-8 character:
+// the prompt goes to the harness on stdin, and invalid UTF-8 kills it.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "\n… (truncated)"
 }

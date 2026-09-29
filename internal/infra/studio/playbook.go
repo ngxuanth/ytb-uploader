@@ -102,6 +102,7 @@ type Runner struct {
 
 	videoID, videoURL string
 	attached          bool
+	short             bool // the dialog linked /shorts/: look in the Shorts tab first
 	reported          contract.Status
 	handedOff         map[string]bool
 	done              []string
@@ -342,8 +343,9 @@ func iife(body string) string { return "(() => { " + vis + " " + body + " })()" 
 
 var (
 	channelInURL = regexp.MustCompile(`/channel/(UC[\w-]{10,})`)
-	videoInLink  = regexp.MustCompile(`youtu\.be/([\w-]{11})|/video/([\w-]{11})`)
-	percent      = regexp.MustCompile(`(\d{1,3})\s*%`)
+	// A Short's upload dialog links youtube.com/shorts/<id> instead of youtu.be.
+	videoInLink = regexp.MustCompile(`(?:youtu\.be/|/video/|/shorts/)([\w-]{11})`)
+	percent     = regexp.MustCompile(`(\d{1,3})\s*%`)
 )
 
 func uploadURL(channel string) string {
@@ -383,7 +385,7 @@ func (r *Runner) buildSteps() []*Step {
 	// dialog, or ''. Studio does not always put it under
 	// .video-url-fadeable, so any youtu.be / studio video link in the
 	// dialog counts.
-	const findLink = `([...document.querySelectorAll('ytcp-uploads-dialog a[href]')].map(a => a.href).find(h => /youtu\.be\/[\w-]{11}|\/video\/[\w-]{11}/.test(h)) || '')`
+	const findLink = `([...document.querySelectorAll('ytcp-uploads-dialog a[href]')].map(a => a.href).find(h => /youtu\.be\/[\w-]{11}|\/video\/[\w-]{11}|\/shorts\/[\w-]{11}/.test(h)) || '')`
 
 	return []*Step{
 		{
@@ -396,7 +398,7 @@ func (r *Runner) buildSteps() []*Step {
 		{
 			Name: "attach", Status: contract.StatusAttaching,
 			skip:  func(r *Runner) bool { return r.task.ExistingVideoID != "" },
-			Goal:  "the video file is attached and the upload dialog shows the video link (a https://youtu.be/<id> link inside ytcp-uploads-dialog)",
+			Goal:  "the video file is attached and the upload dialog shows the video link (a https://youtu.be/<id> link, or https://youtube.com/shorts/<id> for a Short, inside ytcp-uploads-dialog)",
 			Check: iife(`return !!` + findLink + `;`),
 			do: func(ctx context.Context, r *Runner, p Page) error {
 				if r.attached {
@@ -441,7 +443,8 @@ return {link: `+findLink+`, limit: /daily upload limit|upload limit reached|gi�
 				if mm == nil {
 					return fmt.Errorf("no video id in link %q", href)
 				}
-				r.videoID = mm[1] + mm[2]
+				r.videoID = mm[1]
+				r.short = strings.Contains(href, "/shorts/")
 				r.videoURL = "https://youtu.be/" + r.videoID
 				stop, err := r.rep.VideoCreated(ctx, r.videoID, r.videoURL)
 				if err != nil {
@@ -624,35 +627,58 @@ func (r *Runner) reopenDraft(ctx context.Context, p Page) error {
 	if err != nil {
 		return err
 	}
-	if err := p.Navigate(ctx, "https://studio.youtube.com/channel/"+channel+"/videos/upload"); err != nil {
-		return err
-	}
-	find := iife(`const a = document.querySelector('a[href*="/video/` + r.videoID + `/"], a[href*="youtu.be/` + r.videoID + `"]');
+	find := iife(`const a = document.querySelector('a[href*="/video/` + r.videoID + `/"], a[href*="youtu.be/` + r.videoID + `"], a[href*="/shorts/` + r.videoID + `"]');
 if (!a) return 'missing';
 const row = a.closest('ytcp-video-row, [role=row], tr') || a.parentElement;
 const b = [...row.querySelectorAll('ytcp-button, button, a, [role=button]')].find(b => /chỉnh sửa bản nháp|edit draft/i.test((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')));
 if (!b) return 'not a draft';
 b.click(); return 'ok';`)
-	deadline := time.Now().Add(r.StepTimeout)
-	for {
-		var got string
+	var got string
+	err = r.inContentList(ctx, p, channel, func() bool {
 		_ = p.Evaluate(ctx, find, &got)
-		switch got {
-		case "ok":
-			if err := r.waitCheck(ctx, p, dialogOpenJS, r.StepTimeout); err != nil {
-				return fmt.Errorf("draft %s: dialog did not open: %w", r.videoID, err)
-			}
-			return nil
-		case "not a draft":
-			return fmt.Errorf("video %s is not a draft any more; it needs its edit page", r.videoID)
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("video %s is not in the channel's content list", r.videoID)
-		}
-		if err := sleep(ctx, r.PollEvery); err != nil {
+		return got == "ok" || got == "not a draft"
+	})
+	switch {
+	case err != nil:
+		return fmt.Errorf("video %s is not in the channel's content list", r.videoID)
+	case got == "not a draft":
+		return fmt.Errorf("video %s is not a draft any more; it needs its edit page", r.videoID)
+	}
+	if err := r.waitCheck(ctx, p, dialogOpenJS, r.StepTimeout); err != nil {
+		return fmt.Errorf("draft %s: dialog did not open: %w", r.videoID, err)
+	}
+	return nil
+}
+
+// contentTabs are the tabs of the channel's content list a new video can be
+// in: regular videos, and Shorts (vertical videos up to 3 minutes).
+var contentTabs = []string{"upload", "short"}
+
+// inContentList opens each tab of the content list in turn until found
+// holds, giving each tab half of StepTimeout.
+func (r *Runner) inContentList(ctx context.Context, p Page, channel string, found func() bool) error {
+	tabs := contentTabs
+	if r.short {
+		tabs = []string{"short", "upload"}
+	}
+	for _, tab := range tabs {
+		if err := r.navigate(ctx, p, "https://studio.youtube.com/channel/"+channel+"/videos/"+tab, "/videos"); err != nil {
 			return err
 		}
+		deadline := time.Now().Add(r.StepTimeout / 2)
+		for {
+			if found() {
+				return nil
+			}
+			if time.Now().After(deadline) {
+				break
+			}
+			if err := sleep(ctx, r.PollEvery); err != nil {
+				return err
+			}
+		}
 	}
+	return fmt.Errorf("not in the content list")
 }
 
 // url reads the tab's URL, retrying for a while: a tab the launcher just
