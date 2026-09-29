@@ -33,6 +33,12 @@ type job struct {
 	// other task of the profile is assigned.
 	Holding bool   `json:"holding,omitempty"`
 	AgentID string `json:"agent_id,omitempty"`
+	// ParentID is set on a check_video task: the upload task it checks.
+	ParentID string `json:"parent_id,omitempty"`
+	// VideoState is the last state read in Studio for this upload's video;
+	// Rechecks counts the automatic checks while it was processing.
+	VideoState *wire.VideoState `json:"video_state,omitempty"`
+	Rechecks   int              `json:"rechecks,omitempty"`
 
 	Status    wire.Status    `json:"status"`
 	Step      string         `json:"step,omitempty"`

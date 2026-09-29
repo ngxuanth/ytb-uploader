@@ -268,6 +268,15 @@ func (b *localBackend) VideoCreated(_ context.Context, _ *taskmcp.Session, in ta
 	return ack(c), nil
 }
 
+func (b *localBackend) VideoState(_ context.Context, _ *taskmcp.Session, in taskmcp.VideoStateIn) (*taskmcp.Ack, error) {
+	if err := b.checkTask(in.TaskID); err != nil {
+		return nil, err
+	}
+	c := b.touch()
+	logf("task_video_state %s visibility=%s processing=%v restrictions=%q resolutions=%v", in.VideoID, in.Visibility, in.Processing, in.Restrictions, in.Resolutions)
+	return ack(c), nil
+}
+
 func (b *localBackend) Finish(_ context.Context, _ *taskmcp.Session, in taskmcp.FinishIn) (*taskmcp.Ack, error) {
 	if err := b.checkTask(in.TaskID); err != nil {
 		return nil, err

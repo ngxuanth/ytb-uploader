@@ -90,6 +90,8 @@ func runUpload(ctx context.Context, u uploadRun) uploadSummary {
 	case claim.Control == taskmcp.Stop || claim.TaskID == "":
 		logf("task %s: nothing to do (%s)", u.ID, claim.Message)
 		return sum
+	case claim.Kind == taskmcp.KindCheckVideo:
+		return u.check(ctx, client, claim, sum)
 	case claim.Kind != taskmcp.KindUpload || claim.Metadata == nil:
 		// Deleting videos is LLM work.
 		sum.Runner = runnerLLM
@@ -173,6 +175,54 @@ func runUpload(ctx context.Context, u uploadRun) uploadSummary {
 			return sum
 		}
 	}
+}
+
+// check runs a check_video task: the script reads the video's state in
+// Studio and reports it. No LLM: when the page cannot be read the task
+// fails and can be retried.
+func (u uploadRun) check(ctx context.Context, client *taskmcp.Client, claim *taskmcp.ClaimOut, sum uploadSummary) uploadSummary {
+	rep := &reporter{c: client, taskID: claim.TaskID}
+	task := playbook.Task{ExistingVideoID: claim.ExistingVideoID, ChannelID: claim.ChannelID}
+	r := playbook.New(task, rep, func(f string, a ...any) {
+		logf("task %s: "+f, append([]any{u.ID}, a...)...)
+	})
+	err := u.withDriver(ctx, task, func(b *driver.Browser) error { return r.Check(ctx, b) })
+	status, code, reason := "done", "", ""
+	if err != nil {
+		status, code, reason = "failed", "STEP_FAILED", "check_video: "+err.Error()
+		logf("task %s: %s", u.ID, reason)
+	}
+	if ferr := rep.Finish(ctx, status, code, reason, claim.ExistingVideoID); ferr != nil && sum.Err == nil {
+		sum.Err = ferr
+	}
+	return sum
+}
+
+// withDriver opens this profile's Chrome, points the extension at a driver
+// on the attempt's port and runs fn with the connected browser.
+func (u uploadRun) withDriver(ctx context.Context, task playbook.Task, fn func(*driver.Browser) error) error {
+	dctx, cancel := context.WithCancel(ctx)
+	srv := driver.NewServer(fmt.Sprintf("127.0.0.1:%d", u.Port))
+	done := make(chan struct{})
+	var lerr error
+	go func() { lerr = srv.ListenAndServe(dctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	select {
+	case <-done:
+		return fmt.Errorf("driver on port %d: %w", u.Port, lerr)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, err := u.Chrome.Open(dctx, u.Profile); err != nil {
+		return fmt.Errorf("chrome_open: %w", err)
+	}
+	if _, err := u.Chrome.Setup(dctx, u.Profile, u.Port, task.StartURL()); err != nil {
+		return fmt.Errorf("extension_setup: %w", err)
+	}
+	conn, err := waitExtension(dctx, srv, 30*time.Second)
+	if err != nil {
+		return fmt.Errorf("extension did not connect on port %d: %w", u.Port, err)
+	}
+	return fn(srv.Browser(conn.Hello().InstanceID))
 }
 
 // drive runs the playbook with a driver listening on the attempt's port. The
@@ -384,6 +434,14 @@ func (r *reporter) Report(ctx context.Context, step wire.Status, msg string, pro
 
 func (r *reporter) VideoCreated(ctx context.Context, id, url string) (bool, error) {
 	ack, err := r.c.VideoCreated(ctx, taskmcp.VideoCreatedIn{TaskID: r.taskID, VideoID: id, VideoURL: url})
+	if err != nil {
+		return false, err
+	}
+	return ack.Control == taskmcp.Stop, nil
+}
+
+func (r *reporter) VideoState(ctx context.Context, st wire.VideoState) (bool, error) {
+	ack, err := r.c.VideoState(ctx, taskmcp.VideoStateIn{TaskID: r.taskID, VideoState: st})
 	if err != nil {
 		return false, err
 	}

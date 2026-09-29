@@ -23,6 +23,7 @@ import (
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/chromectl"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/harness"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/session"
+	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/taskmcp"
 	"gitlab.volio.vn/tech/backend/yt_uploader/pkg/wire"
 )
 
@@ -287,10 +288,13 @@ func (a *agent) execute(ctx context.Context, cancel context.CancelFunc, msg wire
 		a.fail(task, err)
 		return
 	}
-	videoName := "video" + cleanExt(task.FileExt, task.FileURL)
-	if err := downloadFile(ctx, task.FileURL, filepath.Join(uploadDir, videoName), task.SHA256); err != nil {
-		a.fail(task, err)
-		return
+	// A check_video task only reads Studio; there is no file.
+	if task.Kind != taskmcp.KindCheckVideo {
+		videoName := "video" + cleanExt(task.FileExt, task.FileURL)
+		if err := downloadFile(ctx, task.FileURL, filepath.Join(uploadDir, videoName), task.SHA256); err != nil {
+			a.fail(task, err)
+			return
+		}
 	}
 	if task.ThumbnailURL != "" {
 		thumb := "thumbnail" + cleanExt("", task.ThumbnailURL)

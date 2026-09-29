@@ -49,6 +49,10 @@ func (f *fakeBackend) Finish(context.Context, *Session, FinishIn) (*Ack, error) 
 	return &Ack{Control: Stop}, nil
 }
 
+func (f *fakeBackend) VideoState(context.Context, *Session, VideoStateIn) (*Ack, error) {
+	return &Ack{Control: f.control()}, nil
+}
+
 type bearer struct{ token string }
 
 func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -94,7 +98,7 @@ func TestToolsRoundTripAndStopControl(t *testing.T) {
 	defer cs.Close()
 
 	tools, err := cs.ListTools(context.Background(), nil)
-	if err != nil || len(tools.Tools) != 4 {
+	if err != nil || len(tools.Tools) != 5 {
 		t.Fatalf("tools: %v %v", tools, err)
 	}
 	claim := call[ClaimOut](t, cs, "task_claim", map[string]any{})
@@ -132,7 +136,7 @@ func TestSplitHandlersExposeOneSide(t *testing.T) {
 	}
 	defer rs.Close()
 	got, err := rs.ListTools(context.Background(), nil)
-	if err != nil || len(got.Tools) != 3 {
+	if err != nil || len(got.Tools) != 4 {
 		t.Fatalf("report tools: %v %v", got, err)
 	}
 }

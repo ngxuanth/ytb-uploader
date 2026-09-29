@@ -13,7 +13,7 @@
 ## Chạy server
 
 ```
-./server [-addr 127.0.0.1:8090] [-profiles profile] [-data data/server/tasks.json] [-finish-grace 45s]
+./server [-addr 127.0.0.1:8090] [-profiles profile] [-data data/server/tasks.json] [-finish-grace 45s] [-recheck-processing 10m]
 ./launcher run -server ws://127.0.0.1:8090/ws
 ```
 
@@ -22,6 +22,7 @@
 | `-addr` | `127.0.0.1:8090` | địa chỉ lắng nghe |
 | `-profiles` | `profile` | thư mục Chrome user-data-dir; mỗi thư mục con có file `Preferences` là một profile hợp lệ cho `POST /uploads` |
 | `-data` | `data/server/tasks.json` | file lưu task; ghi file tạm rồi rename sau mỗi thay đổi |
+| `-recheck-processing` | `10m` | video mà Studio còn đang xử lý thì tự kiểm tra lại sau khoảng này, tối đa 6 lần. `0` là tắt |
 | `-finish-grace` | `45s` | sau `task_finish`, nếu phiên hermes chưa thoát trong khoảng này thì server gửi `cancel` cho launcher để dừng nó. `0` là không bao giờ |
 
 API không có xác thực và chỉ nên lắng nghe trên `127.0.0.1`. Mọi body đều là JSON. Lỗi luôn có dạng `{"error": "..."}`.
@@ -131,6 +132,9 @@ Các trường trống bị bỏ khỏi JSON, trừ `attempt`, `progress`, `queu
 | `queued` | task được đưa vào hàng đợi (`POST /uploads`) |
 | `assigned` | server đã giao task cho launcher (`message` = `agent_id`) |
 | `session_lost` | launcher kết nối lại mà không còn phiên của task này |
+| `task_video_state` | script gửi trạng thái video đọc được trong Studio (`message` ví dụ `private, processing`) |
+| `video_checked` | (trên task upload) một task kiểm tra đã đọc trạng thái |
+| `check_queued` | (trên task upload) một task kiểm tra đã được xếp hàng |
 | `stop_after_finish` | phiên vẫn chạy sau `-finish-grace` kể từ `task_finish`; server đã gửi `cancel` cho launcher |
 | `task_claim` | agent gọi `task_claim` |
 | `task_report` | agent hoặc script của launcher gọi `task_report` (`step`, `progress`, `message`; script ghi `message` bắt đầu bằng `[playbook]`) |
@@ -170,6 +174,59 @@ curl -XPOST 127.0.0.1:8090/uploads -H 'content-type: application/json' -d '{
 |---|---|
 | `202` | đã tạo task; body là task. `status` = `ASSIGNED` nếu đã được giao ngay, còn không thì `QUEUED` kèm `queue_position` |
 | `400` | thiếu trường, `visibility` sai, tên profile không hợp lệ, file video/thumbnail không đọc được. Profile không tồn tại thì trả `{"error": "unknown profile", "profiles": [...]}` |
+
+### Trạng thái video trên YouTube
+
+Launcher đọc trạng thái video ngay trong Chrome của profile (danh sách nội dung và trang edit của Studio), bằng script, không dùng LLM:
+
+- **Ngay sau khi upload:** sau khi Lưu, script đọc trạng thái rồi gửi `task_video_state` trước `task_finish`.
+- **Theo yêu cầu:** `POST /tasks/:id/video/check` xếp một task `check_video` vào hàng đợi của profile. Task này không có file, chỉ đọc Studio.
+- **Tự động:** nếu video còn đang xử lý, server tự xếp một lần kiểm tra lại sau `-recheck-processing`, tối đa 6 lần.
+
+Kết quả được lưu vào `video_state` của **task upload**:
+
+```json
+{
+  "video_id": "rTv56pFLq_8",
+  "title": "Benchmark3 thangnx - sample2",
+  "visibility": "private",
+  "visibility_text": "Riêng tư",
+  "draft": false,
+  "restrictions": "",
+  "processing": false,
+  "resolutions": [{"name": "sd", "state": "processed", "label": "Đã xử lý xong độ phân giải chuẩn"}],
+  "filename": "video.mp4",
+  "date": "29 thg 9, 2026 Ngày tải lên",
+  "checked_at": "2026-09-29T11:50:00+07:00",
+  "source": "check"
+}
+```
+
+| Trường | Ý nghĩa |
+|---|---|
+| `visibility` | `private`, `unlisted`, `public`, `scheduled` hoặc `draft`; chữ Studio hiển thị nằm ở `visibility_text` |
+| `draft` | `true` nếu video vẫn là bản nháp (chưa bấm Lưu) |
+| `restrictions` | cột "Hạn chế" của Studio, ví dụ khiếu nại bản quyền; `""` là không có |
+| `processing` | `true` khi còn độ phân giải đang xử lý, hoặc Studio chưa hiện độ phân giải nào |
+| `resolutions` | từng badge độ phân giải (`sd`, `hd`, …) với `state` là `processed`, `processing` hoặc `unknown` |
+| `source` | `after_upload` (đọc ngay sau khi upload) hoặc `check` (task kiểm tra) |
+
+#### `GET /tasks/:id/video`
+
+Trạng thái gần nhất và danh sách các task kiểm tra của video. `:id` là task upload, hoặc một task kiểm tra của nó.
+
+```json
+{"task_id": "srv-ab7c73b9", "profile": "thangnx", "title": "…", "status": "DONE", "video_id": "rTv56pFLq_8",
+ "video_url": "https://youtu.be/rTv56pFLq_8", "video_state": {…}, "rechecks": 1, "checks": [ {task…} ]}
+```
+
+#### `POST /tasks/:id/video/check`
+
+Xếp một task `check_video` (id `chk-…`, `parent_id` là task upload) vào hàng đợi của profile, và trả `202` kèm task đó. Nếu đã có một lần kiểm tra đang chờ, trả lại chính lần đó. Trả `409` nếu task chưa tạo video, hoặc `:id` là một task kiểm tra.
+
+#### `GET /videos?profile=`
+
+Mọi video đã upload qua server (task upload có `video_id`), kèm `video_state`: `{"videos": [ … ]}`.
 
 ### `GET /queues`
 

@@ -713,3 +713,92 @@ func TestScriptThenLLMClaimSeesTheCreatedVideo(t *testing.T) {
 		t.Fatalf("no finish means lost: %s", v.Status)
 	}
 }
+
+func TestVideoStateAndChecks(t *testing.T) {
+	h := newHarness(t)
+	h.st.mu.Lock()
+	h.st.recheck = 50 * time.Millisecond
+	h.st.mu.Unlock()
+	created := h.post("/uploads", uploadIn{Profile: "isophtalic", Channel: "UCtest", Video: h.video, Title: "T"}, http.StatusAccepted)
+	var a wire.Assign
+	h.expect(wire.MsgAssign, &a)
+	if a.Task.Kind != taskmcp.KindUpload || a.Task.FileURL == "" {
+		t.Fatalf("upload assign: %+v", a.Task)
+	}
+	// No video yet: nothing to check.
+	h.post("/tasks/"+created.TaskID+"/video/check", nil, http.StatusConflict)
+
+	c := taskmcp.NewClient(a.TaskMCP.URL, a.TaskMCP.Token, a.ReportMCP.URL, a.ReportMCP.Token)
+	ctx := context.Background()
+	if _, err := c.Claim(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.VideoCreated(ctx, taskmcp.VideoCreatedIn{TaskID: created.TaskID, VideoID: "abcdefghijk"}); err != nil {
+		t.Fatal(err)
+	}
+	// Right after the save Studio still processes the video.
+	if _, err := c.VideoState(ctx, taskmcp.VideoStateIn{TaskID: created.TaskID, VideoState: wire.VideoState{
+		VideoID: "abcdefghijk", Visibility: "private", Processing: true, Source: "after_upload",
+		Resolutions: []wire.ResolutionState{{Name: "sd", State: "processing"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Finish(ctx, taskmcp.FinishIn{TaskID: created.TaskID, Status: "done", VideoID: "abcdefghijk"}); err != nil {
+		t.Fatal(err)
+	}
+	var vv videoView
+	_ = json.Unmarshal(getBody(t, h.base+"/tasks/"+created.TaskID+"/video"), &vv)
+	if vv.VideoState == nil || !vv.VideoState.Processing || vv.VideoState.Visibility != "private" || vv.VideoID != "abcdefghijk" {
+		t.Fatalf("video after upload: %+v", vv)
+	}
+
+	// The automatic recheck waits in the queue until the upload's session ends.
+	time.Sleep(150 * time.Millisecond)
+	h.send(wire.MsgEvent, wire.Event{TaskRef: wire.TaskRef{TaskID: created.TaskID, Attempt: 1}, Type: wire.EventSessionEnded, At: time.Now()})
+	var ca wire.Assign
+	h.expect(wire.MsgAssign, &ca)
+	if ca.Task.Kind != taskmcp.KindCheckVideo || ca.Task.FileURL != "" || ca.Task.ExistingVideoID != "abcdefghijk" {
+		t.Fatalf("check assign: %+v", ca.Task)
+	}
+	cc := taskmcp.NewClient(ca.TaskMCP.URL, ca.TaskMCP.Token, ca.ReportMCP.URL, ca.ReportMCP.Token)
+	claim, err := cc.Claim(ctx)
+	if err != nil || claim.Kind != taskmcp.KindCheckVideo || claim.ExistingVideoID != "abcdefghijk" || claim.ProfileDirectory != "isophtalic" {
+		t.Fatalf("check claim: %+v %v", claim, err)
+	}
+	if _, err := cc.VideoState(ctx, taskmcp.VideoStateIn{TaskID: ca.Task.TaskID, VideoState: wire.VideoState{
+		Visibility: "private", Source: "check", Resolutions: []wire.ResolutionState{{Name: "sd", State: "processed"}, {Name: "hd", State: "processed"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cc.Finish(ctx, taskmcp.FinishIn{TaskID: ca.Task.TaskID, Status: "done", VideoID: "abcdefghijk"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = json.Unmarshal(getBody(t, h.base+"/tasks/"+created.TaskID+"/video"), &vv)
+	if vv.VideoState == nil || vv.VideoState.Processing || vv.VideoState.Source != "check" || vv.VideoState.VideoID != "abcdefghijk" ||
+		vv.Rechecks != 1 || len(vv.Checks) != 1 || vv.Checks[0].Status != wire.StatusDone || vv.Checks[0].ParentID != created.TaskID {
+		t.Fatalf("video after check: %+v", vv)
+	}
+	// The same view is reachable through the check task's id.
+	var viaCheck videoView
+	_ = json.Unmarshal(getBody(t, h.base+"/tasks/"+ca.Task.TaskID+"/video"), &viaCheck)
+	if viaCheck.TaskID != created.TaskID {
+		t.Fatalf("via check: %+v", viaCheck)
+	}
+
+	// A requested check is queued for the profile (free now, so assigned).
+	h.send(wire.MsgEvent, wire.Event{TaskRef: wire.TaskRef{TaskID: ca.Task.TaskID, Attempt: 1}, Type: wire.EventSessionEnded, At: time.Now()})
+	time.Sleep(50 * time.Millisecond)
+	chk := h.post("/tasks/"+created.TaskID+"/video/check", nil, http.StatusAccepted)
+	if chk.Kind != taskmcp.KindCheckVideo || chk.ParentID != created.TaskID {
+		t.Fatalf("requested check: %+v", chk)
+	}
+	h.post("/tasks/"+chk.TaskID+"/video/check", nil, http.StatusConflict)
+
+	var list struct {
+		Videos []videoView `json:"videos"`
+	}
+	_ = json.Unmarshal(getBody(t, h.base+"/videos?profile=isophtalic"), &list)
+	if len(list.Videos) != 1 || list.Videos[0].TaskID != created.TaskID || list.Videos[0].VideoState == nil {
+		t.Fatalf("videos: %+v", list)
+	}
+}

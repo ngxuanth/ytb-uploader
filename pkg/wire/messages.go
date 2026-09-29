@@ -62,16 +62,19 @@ type Heartbeat struct {
 
 // TaskSpec is everything the agent needs to run one attempt.
 type TaskSpec struct {
-	TaskID           string   `json:"task_id"`
-	Attempt          int      `json:"attempt"`
-	ProfileDirectory string   `json:"profile_directory"`
-	ChannelID        string   `json:"channel_id"` // YouTube UC… id
-	FileURL          string   `json:"file_url"`
-	FileSize         int64    `json:"file_size"`
-	SHA256           string   `json:"sha256"`
-	FileExt          string   `json:"file_ext"`
-	ThumbnailURL     string   `json:"thumbnail_url,omitempty"`
-	Metadata         Metadata `json:"metadata"`
+	TaskID           string `json:"task_id"`
+	Attempt          int    `json:"attempt"`
+	ProfileDirectory string `json:"profile_directory"`
+	ChannelID        string `json:"channel_id"` // YouTube UC… id
+	FileURL          string `json:"file_url"`
+	FileSize         int64  `json:"file_size"`
+	SHA256           string `json:"sha256"`
+	FileExt          string `json:"file_ext"`
+	// Kind is taskmcp's kind (upload, check_video); an empty kind is upload.
+	// A check_video task has no file to download.
+	Kind         string   `json:"kind,omitempty"`
+	ThumbnailURL string   `json:"thumbnail_url,omitempty"`
+	Metadata     Metadata `json:"metadata"`
 	// ExistingVideoID is set when an earlier attempt already created a video;
 	// the agent reconciles it instead of uploading blindly again.
 	ExistingVideoID string    `json:"existing_video_id,omitempty"`

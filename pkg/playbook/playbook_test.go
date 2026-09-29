@@ -40,10 +40,15 @@ type fakeStudio struct {
 	realNext   int    // real (CDP) clicks on Next
 	domIgnore  bool   // DOM clicks on radios and Save do nothing
 	realClicks int    // real (CDP) clicks on radios and Save
+
+	rowVisibility string           // Visibility column in the content list
+	rowMissing    bool             // the video is not in the content list
+	badges        []map[string]any // #video-resolutions badges on the edit page
 }
 
 func newStudio(meta wire.Metadata) *fakeStudio {
-	return &fakeStudio{meta: meta, url: "https://studio.youtube.com/channel/UC0123456789abcdef/videos/upload?d=ud", title: "video", dialogOpen: true}
+	return &fakeStudio{meta: meta, url: "https://studio.youtube.com/channel/UC0123456789abcdef/videos/upload?d=ud", title: "video", dialogOpen: true,
+		rowVisibility: "Riêng tư", badges: []map[string]any{{"name": "sd", "label": "Đã xử lý xong độ phân giải chuẩn"}}}
 }
 
 func (f *fakeStudio) Navigate(_ context.Context, url string) error { f.url = url; return nil }
@@ -98,6 +103,16 @@ func (f *fakeStudio) ClickSelector(_ context.Context, sel string) error {
 func (f *fakeStudio) Evaluate(_ context.Context, expr string, out any) error {
 	var v any
 	switch {
+	case strings.Contains(expr, ".tablecell-"):
+		if f.rowMissing {
+			v = map[string]any{"found": false}
+		} else {
+			v = map[string]any{"found": true, "visibility": f.rowVisibility, "restrictions": "—", "date": "29 thg 9, 2026 Ngày tải lên", "draft": false}
+		}
+	case strings.Contains(expr, "#video-resolutions"):
+		v = map[string]any{"ready": true, "title": f.title, "filename": "video.mp4", "res": f.badges}
+	case strings.Contains(expr, "return vis(e) && !e.hasAttribute('disabled')"):
+		v = true // the element is still there to click
 	case strings.Contains(expr, "e.click(); return true"):
 		if !f.domIgnore {
 			switch {
@@ -172,8 +187,9 @@ func (f *fakeStudio) Evaluate(_ context.Context, expr string, out any) error {
 type call struct{ kind, a, b string }
 
 type fakeReporter struct {
-	calls []call
-	stop  bool
+	calls  []call
+	stop   bool
+	states []wire.VideoState
 }
 
 func (r *fakeReporter) Report(_ context.Context, step wire.Status, msg string, _ int) (bool, error) {
@@ -189,6 +205,11 @@ func (r *fakeReporter) VideoCreated(_ context.Context, id, _ string) (bool, erro
 func (r *fakeReporter) Finish(_ context.Context, status, code, _, id string) error {
 	r.calls = append(r.calls, call{"finish", status + "/" + code, id})
 	return nil
+}
+
+func (r *fakeReporter) VideoState(_ context.Context, st wire.VideoState) (bool, error) {
+	r.states = append(r.states, st)
+	return false, nil
 }
 
 func (r *fakeReporter) last() call { return r.calls[len(r.calls)-1] }
@@ -303,6 +324,7 @@ func TestNoChannelUsesTheProfileDefault(t *testing.T) {
 	f.url = "https://studio.youtube.com/channel/UCdefault0000000000/videos"
 	r := New(Task{VideoPath: "/tmp/v.mp4", Meta: meta}, rep, nil)
 	r.PollEvery, r.StepTimeout, r.Settle = time.Millisecond, 50*time.Millisecond, time.Millisecond
+	r.StateAfterUpload = false // the test looks at the last URL
 	if res := r.Run(context.Background(), f); res.Outcome != Done {
 		t.Fatalf("result %+v", res)
 	}
@@ -349,6 +371,7 @@ func TestExistingVideoReopensItsDraft(t *testing.T) {
 	f.dialogOpen, f.drafts, f.link = false, "abcdefghijk", "https://youtu.be/abcdefghijk"
 	r := New(Task{ExistingVideoID: "abcdefghijk", ChannelID: "UC0123456789abcdef", VideoPath: "/tmp/v.mp4", Meta: meta}, rep, nil)
 	r.PollEvery, r.StepTimeout, r.Settle = time.Millisecond, 50*time.Millisecond, time.Millisecond
+	r.StateAfterUpload = false // the test looks at the last URL
 	res := r.Run(context.Background(), f)
 	if res.Outcome != Done || f.uploads != 0 || !f.saved || !f.dialogOpen {
 		t.Fatalf("result %+v uploads=%d saved=%v", res, f.uploads, f.saved)
@@ -420,5 +443,56 @@ func TestRadiosAndSaveUseDOMClicksWithRealFallback(t *testing.T) {
 	}
 	if f.realClicks != 3 || !f.audience || !f.saved {
 		t.Fatalf("fallback: real=%d studio=%+v", f.realClicks, f)
+	}
+}
+
+func TestStateIsReadAndReportedAfterUpload(t *testing.T) {
+	f, rep := newStudio(meta), &fakeReporter{}
+	f.badges = []map[string]any{{"name": "sd", "label": "Đã xử lý xong độ phân giải chuẩn"}, {"name": "hd", "label": "Đang xử lý độ phân giải cao"}}
+	if res := newRunner(meta, rep).Run(context.Background(), f); res.Outcome != Done {
+		t.Fatalf("result %+v", res)
+	}
+	if len(rep.states) != 1 {
+		t.Fatalf("states %+v", rep.states)
+	}
+	st := rep.states[0]
+	if st.VideoID != "abcdefghijk" || st.Visibility != "private" || !st.Processing || st.Restrictions != "" || st.Source != "after_upload" ||
+		len(st.Resolutions) != 2 || st.Resolutions[0].State != "processed" || st.Resolutions[1].State != "processing" || st.Title != meta.Title {
+		t.Fatalf("state %+v", st)
+	}
+	if rep.last() != (call{"finish", "done/", "abcdefghijk"}) {
+		t.Fatalf("finish after the state: %+v", rep.last())
+	}
+}
+
+func TestStateReadFailureDoesNotFailTheUpload(t *testing.T) {
+	f, rep := newStudio(meta), &fakeReporter{}
+	f.rowMissing = true
+	if res := newRunner(meta, rep).Run(context.Background(), f); res.Outcome != Done || len(rep.states) != 0 {
+		t.Fatalf("result %+v states %+v", res, rep.states)
+	}
+}
+
+func TestCheckReportsTheState(t *testing.T) {
+	f, rep := newStudio(meta), &fakeReporter{}
+	f.rowVisibility = "Không công khai"
+	r := New(Task{ExistingVideoID: "abcdefghijk", ChannelID: "UC0123456789abcdef"}, rep, nil)
+	r.PollEvery, r.StepTimeout, r.Settle = time.Millisecond, 50*time.Millisecond, time.Millisecond
+	if err := r.Check(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.states) != 1 || rep.states[0].Visibility != "unlisted" || rep.states[0].Processing || rep.states[0].Source != "check" {
+		t.Fatalf("states %+v", rep.states)
+	}
+}
+
+func TestVisibilityWords(t *testing.T) {
+	for text, want := range map[string]string{
+		"Riêng tư": "private", "Private": "private", "Không công khai": "unlisted", "Unlisted": "unlisted",
+		"Công khai": "public", "Public": "public", "Đã lên lịch": "scheduled", "Bản nháp": "draft",
+	} {
+		if got := normalizeVisibility(text, false); got != want {
+			t.Errorf("%q: %q, want %q", text, got, want)
+		}
 	}
 }

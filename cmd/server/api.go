@@ -30,6 +30,10 @@ type taskView struct {
 	ExistingVideoID string      `json:"existing_video_id,omitempty"`
 	// QueuePosition is 1 for the next task of the profile, 0 when not queued.
 	QueuePosition int `json:"queue_position"`
+	// Kind is upload or check_video; ParentID is the upload a check reads.
+	Kind       string           `json:"kind,omitempty"`
+	ParentID   string           `json:"parent_id,omitempty"`
+	VideoState *wire.VideoState `json:"video_state,omitempty"`
 	// AgentID is the launcher the current attempt was assigned to.
 	AgentID   string         `json:"agent_id,omitempty"`
 	ErrorCode wire.ErrorCode `json:"error_code,omitempty"`
@@ -53,7 +57,7 @@ func (j *job) view(detail bool) taskView {
 		Profile: j.Claim.ProfileDirectory, Channel: j.Claim.ChannelID,
 		Status: j.Status, Step: j.Step, Progress: j.Progress, Message: j.Message,
 		VideoID: j.VideoID, VideoURL: j.VideoURL, ExistingVideoID: j.Claim.ExistingVideoID,
-		AgentID:   j.AgentID,
+		AgentID: j.AgentID, Kind: j.Claim.Kind, ParentID: j.ParentID, VideoState: j.VideoState,
 		ErrorCode: j.ErrorCode, Error: j.Error,
 		FinishReported: j.Finish != nil, Finish: j.Finish,
 		SessionEnded: j.Session != nil, Session: j.Session,

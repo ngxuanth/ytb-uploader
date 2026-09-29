@@ -124,3 +124,34 @@ func UploadBudget(size int64) time.Duration {
 	}
 	return base + time.Duration(size/rate)*time.Second
 }
+
+// VideoState is what YouTube Studio shows about an uploaded video, read by
+// the launcher's script from the channel's content list and the video's
+// edit page.
+type VideoState struct {
+	VideoID string `json:"video_id"`
+	Title   string `json:"title,omitempty"`
+	// Visibility is private, unlisted, public, scheduled or draft; the text
+	// Studio showed is in VisibilityText.
+	Visibility     string `json:"visibility,omitempty"`
+	VisibilityText string `json:"visibility_text,omitempty"`
+	Draft          bool   `json:"draft"`
+	// Restrictions is the Restrictions column ("" when Studio shows none),
+	// e.g. a copyright claim.
+	Restrictions string `json:"restrictions,omitempty"`
+	// Processing is true while Studio still processes a resolution;
+	// Resolutions lists the badges it shows, e.g. {"sd", "processed"}.
+	Processing  bool              `json:"processing"`
+	Resolutions []ResolutionState `json:"resolutions,omitempty"`
+	Filename    string            `json:"filename,omitempty"`
+	Date        string            `json:"date,omitempty"`
+	CheckedAt   time.Time         `json:"checked_at"`
+	// Source is "after_upload" or "check".
+	Source string `json:"source,omitempty"`
+}
+
+type ResolutionState struct {
+	Name  string `json:"name"`  // sd, hd, 4k…
+	State string `json:"state"` // processed, processing
+	Label string `json:"label"` // Studio's own words
+}

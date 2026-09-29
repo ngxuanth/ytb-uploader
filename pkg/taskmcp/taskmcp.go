@@ -35,6 +35,9 @@ type Session struct {
 const (
 	KindUpload      = "upload"
 	KindDeleteVideo = "delete_video"
+	// KindCheckVideo reads a video's state in Studio (visibility,
+	// processing, restrictions) and reports it with task_video_state.
+	KindCheckVideo = "check_video"
 )
 
 type ClaimOut struct {
@@ -76,6 +79,12 @@ type FinishIn struct {
 	Reason    string `json:"reason,omitempty" jsonschema:"what went wrong, one or two sentences"`
 }
 
+// VideoStateIn is what the script read about the task's video in Studio.
+type VideoStateIn struct {
+	TaskID string `json:"task_id"`
+	wire.VideoState
+}
+
 type Ack struct {
 	Control Control `json:"control"`
 	Message string  `json:"message,omitempty"`
@@ -89,6 +98,7 @@ type Backend interface {
 	Report(ctx context.Context, s *Session, in ReportIn) (*Ack, error)
 	VideoCreated(ctx context.Context, s *Session, in VideoCreatedIn) (*Ack, error)
 	Finish(ctx context.Context, s *Session, in FinishIn) (*Ack, error)
+	VideoState(ctx context.Context, s *Session, in VideoStateIn) (*Ack, error)
 }
 
 // ErrUnauthorized is returned by Authenticate for unknown or ended sessions.
@@ -174,6 +184,15 @@ func newServer(b Backend, s *Session, set tools, name string) *mcp.Server {
 			Description: "Call this as soon as the upload dialog shows the video link, before filling any details.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, in VideoCreatedIn) (*mcp.CallToolResult, *Ack, error) {
 			out, err := b.VideoCreated(ctx, s, in)
+			return nil, out, err
+		})
+	}
+	if set&ToolsVideo != 0 {
+		mcp.AddTool(srv, &mcp.Tool{
+			Name:        "task_video_state",
+			Description: "Record what YouTube Studio shows about the task's video: visibility, processing state of each resolution, restrictions, title.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, in VideoStateIn) (*mcp.CallToolResult, *Ack, error) {
+			out, err := b.VideoState(ctx, s, in)
 			return nil, out, err
 		})
 	}

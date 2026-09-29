@@ -35,6 +35,7 @@ func main() {
 	profiles := flag.String("profiles", "profile", "directory whose subfolders are Chrome profiles")
 	data := flag.String("data", "data/server/tasks.json", "JSON file the tasks are saved to")
 	grace := flag.Duration("finish-grace", 45*time.Second, "after task_finish, stop a session that has not exited within this long (0 = never)")
+	recheck := flag.Duration("recheck-processing", 10*time.Minute, "check a video Studio still processes again after this long, up to 6 times (0 = never)")
 	flag.Parse()
 	absProfiles, err := filepath.Abs(*profiles)
 	if err != nil {
@@ -49,6 +50,7 @@ func main() {
 		log.Fatal(err)
 	}
 	st.finishGrace = *grace
+	st.recheck = *recheck
 	log.Printf("listening on http://%s  ws://%s/ws", *addr, *addr)
 	log.Printf("profiles are folders in %s; tasks are saved to %s", absProfiles, absData)
 	log.Fatal(st.app().Listen(*addr))
@@ -80,6 +82,9 @@ type state struct {
 	// finishGrace is how long a session may keep running after task_finish
 	// before the server asks its launcher to stop it (0 = never).
 	finishGrace time.Duration
+	// recheck is how long after a "still processing" state the video is
+	// checked again (0 = never).
+	recheck time.Duration
 
 	mu      sync.Mutex
 	agents  map[*websocket.Conn]*agentConn
@@ -92,10 +97,10 @@ func newState(base, profilesDir, dataFile string) (*state, error) {
 		base:        strings.TrimRight(base, "/"),
 		profilesDir: profilesDir,
 		store:       &store{path: dataFile},
-		finishGrace: 45 * time.Second,
-		agents:      map[*websocket.Conn]*agentConn{},
-		byToken:     map[string]*job{},
-		byID:        map[string]*job{},
+		finishGrace: 45 * time.Second, recheck: 10 * time.Minute,
+		agents:  map[*websocket.Conn]*agentConn{},
+		byToken: map[string]*job{},
+		byID:    map[string]*job{},
 	}
 	jobs, err := st.store.load()
 	if err != nil {
@@ -149,6 +154,9 @@ func (st *state) app() *fiber.App {
 	app.Get("/queues", st.listQueues)
 	app.Get("/tasks", st.listTasks)
 	app.Get("/tasks/:id", st.getTask)
+	app.Get("/tasks/:id/video", st.getVideo)
+	app.Post("/tasks/:id/video/check", st.checkVideo)
+	app.Get("/videos", st.listVideos)
 	app.Post("/tasks/:id/retry", st.retryTask)
 	app.Post("/tasks/:id/cancel", st.cancelTask)
 	app.Get("/files/:id/:name", st.file)
@@ -420,12 +428,14 @@ func (st *state) assign(j *job) wire.Assign {
 	task := wire.TaskSpec{
 		TaskID: j.Claim.TaskID, Attempt: j.Claim.Attempt,
 		ProfileDirectory: j.Claim.ProfileDirectory,
-		FileURL:          st.base + "/files/" + j.Claim.TaskID + "/" + j.VideoName,
-		SHA256:           j.Sum, FileExt: j.Ext,
+		SHA256:           j.Sum, FileExt: j.Ext, Kind: j.Claim.Kind,
 		ExistingVideoID: j.Claim.ExistingVideoID,
 		FileSize:        j.Size,
 		// Big files get longer: the deadline grows with the upload.
 		Deadline: time.Now().Add(max(45*time.Minute, wire.UploadBudget(j.Size))),
+	}
+	if j.VideoName != "" {
+		task.FileURL = st.base + "/files/" + j.Claim.TaskID + "/" + j.VideoName
 	}
 	if j.ThumbName != "" {
 		task.ThumbnailURL = st.base + "/files/" + j.Claim.TaskID + "/" + j.ThumbName

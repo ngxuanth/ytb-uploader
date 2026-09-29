@@ -35,6 +35,7 @@ type Reporter interface {
 	Report(ctx context.Context, step wire.Status, message string, progress int) (stop bool, err error)
 	VideoCreated(ctx context.Context, videoID, videoURL string) (stop bool, err error)
 	Finish(ctx context.Context, status, errorCode, reason, videoID string) error
+	VideoState(ctx context.Context, st wire.VideoState) (stop bool, err error)
 }
 
 // Task is the part of task_claim the script uses.
@@ -121,6 +122,9 @@ type Runner struct {
 	// StallTimeout ends the upload wait when the progress label has not
 	// changed for this long.
 	StallTimeout time.Duration
+	// StateAfterUpload reads the video's state in Studio after the save and
+	// reports it with task_video_state (on by default).
+	StateAfterUpload bool
 }
 
 func New(task Task, rep Reporter, logf func(string, ...any)) *Runner {
@@ -130,7 +134,7 @@ func New(task Task, rep Reporter, logf func(string, ...any)) *Runner {
 	r := &Runner{
 		task: task, rep: rep, logf: logf, handedOff: map[string]bool{},
 		PollEvery: time.Second, StepTimeout: 45 * time.Second, UploadTimeout: 30 * time.Minute,
-		Settle: 2 * time.Second, StallTimeout: 10 * time.Minute,
+		Settle: 2 * time.Second, StallTimeout: 10 * time.Minute, StateAfterUpload: true,
 	}
 	if task.ExistingVideoID != "" {
 		r.videoID, r.videoURL, r.attached = task.ExistingVideoID, "https://youtu.be/"+task.ExistingVideoID, true
@@ -219,6 +223,18 @@ func (r *Runner) Run(ctx context.Context, p Page) Result {
 		}
 		r.logf("playbook: %s done in %s", s.Name, time.Since(began).Round(100*time.Millisecond))
 		r.next(s)
+	}
+	if r.StateAfterUpload && r.videoID != "" {
+		// A failed read does not undo the upload; it is only logged.
+		if st, err := r.ReadVideoState(ctx, p, r.videoID); err != nil {
+			r.logf("playbook: read video state: %v", err)
+		} else {
+			st.Source = "after_upload"
+			r.logf("playbook: video %s is %s, processing=%v, restrictions=%q", st.VideoID, st.Visibility, st.Processing, st.Restrictions)
+			if _, err := r.rep.VideoState(ctx, st); err != nil {
+				r.logf("playbook: task_video_state: %v", err)
+			}
+		}
 	}
 	if err := r.rep.Finish(ctx, "done", "", "", r.videoID); err != nil {
 		return Result{Outcome: Failed, Err: err, Fatal: true}
@@ -484,7 +500,7 @@ return {link: `+findLink+`, limit: /daily upload limit|upload limit reached|gi�
 			Goal:  "the audience radio " + radio(kids) + " is selected (aria-checked=\"true\")",
 			Check: checked(radio(kids)),
 			do: func(ctx context.Context, r *Runner, p Page) error {
-				return r.click(ctx, p, radio(kids), checked(radio(kids)))
+				return r.click(ctx, p, radio(kids), checked(radio(kids)), r.Settle)
 			},
 		},
 		{
@@ -499,7 +515,7 @@ return {link: `+findLink+`, limit: /daily upload limit|upload limit reached|gi�
 			Check:       checked(radio(visibility)),
 			Unsupported: m.ScheduleAt != nil,
 			do: func(ctx context.Context, r *Runner, p Page) error {
-				return r.click(ctx, p, radio(visibility), checked(radio(visibility)))
+				return r.click(ctx, p, radio(visibility), checked(radio(visibility)), r.Settle)
 			},
 		},
 		{
@@ -513,10 +529,12 @@ return {link: `+findLink+`, limit: /daily upload limit|upload limit reached|gi�
 			Goal:  "Save/Publish (#done-button) was pressed and Studio confirmed it: the upload dialog closed, or a confirmation shows (\"Video processing\" / share dialog; close it)",
 			Check: publishedJS,
 			do: func(ctx context.Context, r *Runner, p Page) error {
-				if err := r.click(ctx, p, "#done-button", publishedJS); err != nil {
+				// Studio takes a few seconds to confirm a save.
+				if err := r.click(ctx, p, "#done-button", publishedJS, r.StepTimeout/3); err != nil {
 					return err
 				}
 				if ok, _ := r.check(ctx, p, publishedJS); ok {
+					r.closeProcessingNotice(ctx, p)
 					return nil
 				}
 				// "Publish anyway" when Studio is still checking the video.
@@ -636,10 +654,31 @@ b.click(); return 'ok';`)
 	}
 }
 
+// url reads the tab's URL, retrying for a while: a tab the launcher just
+// opened has no URL until its first navigation commits.
+func (r *Runner) url(ctx context.Context, p Page) (string, error) {
+	deadline := time.Now().Add(r.StepTimeout / 3)
+	for {
+		u, err := p.URL(ctx)
+		if err == nil && u != "" {
+			return u, nil
+		}
+		if time.Now().After(deadline) {
+			if err == nil {
+				err = errors.New("the tab has no URL")
+			}
+			return "", err
+		}
+		if err := sleep(ctx, r.PollEvery); err != nil {
+			return "", err
+		}
+	}
+}
+
 // resolveChannel is the task's channel, or the profile's default one read
 // from the URL Studio redirects to.
 func resolveChannel(ctx context.Context, r *Runner, p Page) (string, error) {
-	u, err := p.URL(ctx)
+	u, err := r.url(ctx, p)
 	if err != nil {
 		return "", err
 	}
@@ -674,7 +713,7 @@ func resolveChannel(ctx context.Context, r *Runner, p Page) (string, error) {
 }
 
 func doOpen(ctx context.Context, r *Runner, p Page) error {
-	u, err := p.URL(ctx)
+	u, err := r.url(ctx, p)
 	if err != nil {
 		return err
 	}
@@ -842,8 +881,22 @@ func (r *Runner) waitPage(ctx context.Context, p Page, before string) bool {
 // publishedJS holds once Studio confirmed the save: the share dialog, the
 // "video processing" notice, or the upload dialog gone.
 var publishedJS = iife(`if (vis(document.querySelector('ytcp-video-share-dialog'))) return true;
-if ([...document.querySelectorAll('tp-yt-paper-dialog, ytcp-dialog, [role=dialog]')].some(d => vis(d) && /video processing|still processing|đang xử lý video|vẫn đang được xử lý|video published|video đã được xuất bản|video đã được lưu/i.test(d.innerText || ''))) return true;
+if ([...document.querySelectorAll('tp-yt-paper-dialog, ytcp-dialog, [role=dialog]')].some(d => vis(d) && /video processing|still processing|xử lý video|vẫn đang (được )?xử lý|video published|video đã được xuất bản|video đã được lưu/i.test(d.innerText || ''))) return true;
 return !vis(document.querySelector('#done-button')) && !vis(document.querySelector('#privacy-radios')) && location.host === 'studio.youtube.com';`)
+
+// closeProcessingNotice closes the "Video processing" confirmation Studio
+// shows after saving a video that is still being processed; the save is
+// done, the notice only covers the page.
+func (r *Runner) closeProcessingNotice(ctx context.Context, p Page) {
+	var closed any
+	_ = p.Evaluate(ctx, iife(`const d = [...document.querySelectorAll('tp-yt-paper-dialog, ytcp-dialog, [role=dialog]')].find(d => vis(d) && /video processing|still processing|xử lý video|vẫn đang (được )?xử lý/i.test(d.innerText || ''));
+if (!d) return false;
+const btn = [...d.querySelectorAll('ytcp-button, button, [role=button]')].find(x => vis(x) && /^(đóng|close|ok|đã hiểu|got it)$/i.test(((x.innerText || '').trim()) || x.getAttribute('aria-label') || ''));
+if (!btn) return false; btn.click(); return 'closed';`), &closed)
+	if closed == "closed" {
+		r.logf("playbook: closed the \"video processing\" notice")
+	}
+}
 
 // clickJS is a DOM click on the element, centred first: no animated mouse
 // move, which makes a real click through the extension take seconds.
@@ -853,10 +906,17 @@ func clickJS(sel string) string {
 
 // click presses sel with a DOM click and checks the result; if the page did
 // not react (Studio can ignore synthetic clicks), it does a real click.
-func (r *Runner) click(ctx context.Context, p Page, sel, check string) error {
+func (r *Runner) click(ctx context.Context, p Page, sel, check string, wait time.Duration) error {
 	var ok bool
 	if err := p.Evaluate(ctx, clickJS(sel), &ok); err == nil && ok {
-		if check == "" || r.waitCheck(ctx, p, check, r.Settle) == nil {
+		if check == "" || r.waitCheck(ctx, p, check, wait) == nil {
+			return nil
+		}
+		// Only click for real when the element is still there to click:
+		// once Studio covers it with a confirmation, the click happened.
+		var still bool
+		_ = p.Evaluate(ctx, iife(`const e = document.querySelector(`+js(sel)+`); return vis(e) && !e.hasAttribute('disabled') && e.getAttribute('aria-disabled') !== 'true';`), &still)
+		if !still {
 			return nil
 		}
 		r.logf("playbook: DOM click on %s had no effect; clicking for real", sel)

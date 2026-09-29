@@ -35,6 +35,11 @@ func (c *Client) VideoCreated(ctx context.Context, in VideoCreatedIn) (*Ack, err
 	return &out, c.call(ctx, c.reportURL, c.reportToken, "task_video_created", in, &out)
 }
 
+func (c *Client) VideoState(ctx context.Context, in VideoStateIn) (*Ack, error) {
+	var out Ack
+	return &out, c.call(ctx, c.reportURL, c.reportToken, "task_video_state", in, &out)
+}
+
 func (c *Client) Finish(ctx context.Context, in FinishIn) (*Ack, error) {
 	var out Ack
 	return &out, c.call(ctx, c.reportURL, c.reportToken, "task_finish", in, &out)
