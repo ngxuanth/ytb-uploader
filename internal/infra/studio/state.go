@@ -3,7 +3,6 @@ package studio
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -88,7 +87,7 @@ func rowJS(videoID string) string {
 if (!a) return {found: false};
 const row = a.closest('ytcp-video-row') || a.parentElement;
 const g = c => (row.querySelector('.tablecell-' + c)?.innerText || '').trim().replace(/\s+/g, ' ');
-const draft = [...row.querySelectorAll('ytcp-button, button, a, [role=button]')].some(b => /chỉnh sửa bản nháp|edit draft/i.test((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')));
+const draft = [...row.querySelectorAll('ytcp-button, button, a, [role=button]')].some(b => ` + jsRE(phEditDraft.alts) + `.test((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')));
 return {found: true, visibility: g('visibility'), restrictions: g('restrictions'), date: g('date'), draft};`)
 }
 
@@ -99,14 +98,15 @@ const res = [...document.querySelectorAll('#video-resolutions [id^="badge-"]')].
 return {ready: !!box, title: (box?.textContent || '').trim(), filename: (document.querySelector('#original-filename')?.innerText || '').trim(), res};
 })()`
 
+// Visibility and resolution words come from the phrase registry (phrases.go).
 var (
-	visUnlisted  = regexp.MustCompile(`(?i)không công khai|unlisted`)
-	visPrivate   = regexp.MustCompile(`(?i)riêng tư|private`)
-	visPublic    = regexp.MustCompile(`(?i)công khai|public`)
-	visScheduled = regexp.MustCompile(`(?i)lên lịch|scheduled`)
-	visDraft     = regexp.MustCompile(`(?i)bản nháp|draft`)
-	resDone      = regexp.MustCompile(`(?i)đã xử lý xong|processed|hoàn tất|complete`)
-	resBusy      = regexp.MustCompile(`(?i)đang xử lý|processing`)
+	visUnlisted  = goRE(phVisUnlisted.alts)
+	visPrivate   = goRE(phVisPrivate.alts)
+	visPublic    = goRE(phVisPublic.alts)
+	visScheduled = goRE(phVisScheduled.alts)
+	visDraft     = goRE(phVisDraft.alts)
+	resDone      = goRE(phResDone.alts)
+	resBusy      = goRE(phResBusy.alts)
 )
 
 func normalizeVisibility(text string, draft bool) string {

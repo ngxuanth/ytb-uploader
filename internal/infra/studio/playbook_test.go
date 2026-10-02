@@ -354,11 +354,11 @@ func TestNoChannelUsesTheProfileDefault(t *testing.T) {
 }
 
 // limitRe pulls the regular expression out of the attach step's JS, so the
-// test checks the page text against exactly what the script looks for.
+// test checks the page text against exactly what the script looks for. The
+// script builds it with jsRE (phrases.go), so the literal is /(...)/i.
 func limitRe(expr string) *regexp.Regexp {
-	i := strings.Index(expr, "limit: /")
-	j := strings.Index(expr[i+8:], "/.test")
-	return regexp.MustCompile(expr[i+8 : i+8+j])
+	rest := expr[strings.Index(expr, "limit: /")+len("limit: /"):]
+	return regexp.MustCompile("(?i)" + rest[:strings.Index(rest, "/i.test")])
 }
 
 func TestDailyUploadLimitIsNeedsAttention(t *testing.T) {

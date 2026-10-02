@@ -27,9 +27,10 @@ var (
 // as "to follow YouTube policy, go to 'Use of AI'…". It only clicks a close
 // button whose surrounding block has a known notice text and does not hold
 // the dialog's own controls, so it can never close the upload dialog.
-const interstitialJS = `(() => { ` + vis + `
-const notice = /sử dụng ai|use of ai|altered or synthetic|nội dung (bị )?(thay đổi|chỉnh sửa) hoặc (tổng hợp|tạo)/i;
-const close = /^(đóng|close|bỏ qua|dismiss|got it|đã hiểu|ok)$/i;
+// The notice and button wordings come from the phrase registry (phrases.go).
+var interstitialJS = `(() => { ` + vis + `
+const notice = ` + jsRE(phAINotice.alts) + `;
+const close = ` + jsExact(phCloseButton.alts) + `;
 const closed = [];
 for (const b of document.querySelectorAll('button, ytcp-button, tp-yt-paper-icon-button, ytcp-icon-button, [role=button]')) {
   if (!vis(b)) continue;
@@ -66,7 +67,7 @@ b.click(); return true; })()`
 // publishedJS holds once Studio confirmed the save: the share dialog, the
 // "video processing" notice, or the upload dialog gone.
 var publishedJS = iife(`if (vis(document.querySelector('ytcp-video-share-dialog'))) return true;
-if ([...document.querySelectorAll('tp-yt-paper-dialog, ytcp-dialog, [role=dialog]')].some(d => vis(d) && /video processing|still processing|xử lý video|vẫn đang (được )?xử lý|video published|video đã được xuất bản|video đã được lưu/i.test(d.innerText || ''))) return true;
+if ([...document.querySelectorAll('tp-yt-paper-dialog, ytcp-dialog, [role=dialog]')].some(d => vis(d) && ` + jsRE(alts(phProcessingDialog, phVideoSaved)) + `.test(d.innerText || ''))) return true;
 return !vis(document.querySelector('#done-button')) && !vis(document.querySelector('#privacy-radios')) && location.host === 'studio.youtube.com';`)
 
 // clickJS is a DOM click on the element, centred first: no animated mouse

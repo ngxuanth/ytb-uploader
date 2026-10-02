@@ -59,7 +59,7 @@ func (r *Runner) buildSteps() []*Step {
 						Limit bool   `json:"limit"`
 					}
 					_ = p.Evaluate(ctx, iife(`const t = (document.querySelector('ytcp-uploads-dialog')?.innerText || '').toLowerCase();
-return {link: `+findLink+`, limit: /daily upload limit|upload limit reached|giới hạn tải (video )?lên hằng ngày|đã đạt (đến )?giới hạn/.test(t)};`), &st)
+return {link: `+findLink+`, limit: `+jsRE(phUploadLimit.alts)+`.test(t)};`), &st)
 					if st.Link != "" {
 						return nil
 					}
@@ -250,7 +250,7 @@ func (r *Runner) reopenDraft(ctx context.Context, p Page) error {
 	find := iife(`const a = document.querySelector('a[href*="/video/` + r.videoID + `/"], a[href*="youtu.be/` + r.videoID + `"], a[href*="/shorts/` + r.videoID + `"]');
 if (!a) return 'missing';
 const row = a.closest('ytcp-video-row, [role=row], tr') || a.parentElement;
-const b = [...row.querySelectorAll('ytcp-button, button, a, [role=button]')].find(b => /chỉnh sửa bản nháp|edit draft/i.test((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')));
+const b = [...row.querySelectorAll('ytcp-button, button, a, [role=button]')].find(b => ` + jsRE(phEditDraft.alts) + `.test((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')));
 if (!b) return 'not a draft';
 b.click(); return 'ok';`)
 	var got string
@@ -434,7 +434,7 @@ return {done: d, label: (l?.innerText || '').trim()};`), &st)
 		if mm := percent.FindStringSubmatch(st.Label); mm != nil {
 			pct, _ = strconv.Atoi(mm[1])
 		}
-		if low := strings.ToLower(st.Label); strings.Contains(low, "xử lý") || strings.Contains(low, "process") || strings.Contains(low, "kiểm tra") || strings.Contains(low, "check") {
+		if labelMeansProcessing(st.Label) {
 			status = contract.StatusProcessing
 		}
 		if st.Label != lastLabel {
@@ -513,9 +513,9 @@ func (r *Runner) waitPage(ctx context.Context, p Page, before string) bool {
 // done, the notice only covers the page.
 func (r *Runner) closeProcessingNotice(ctx context.Context, p Page) {
 	var closed any
-	_ = p.Evaluate(ctx, iife(`const d = [...document.querySelectorAll('tp-yt-paper-dialog, ytcp-dialog, [role=dialog]')].find(d => vis(d) && /video processing|still processing|xử lý video|vẫn đang (được )?xử lý/i.test(d.innerText || ''));
+	_ = p.Evaluate(ctx, iife(`const d = [...document.querySelectorAll('tp-yt-paper-dialog, ytcp-dialog, [role=dialog]')].find(d => vis(d) && `+jsRE(phProcessingDialog.alts)+`.test(d.innerText || ''));
 if (!d) return false;
-const btn = [...d.querySelectorAll('ytcp-button, button, [role=button]')].find(x => vis(x) && /^(đóng|close|ok|đã hiểu|got it)$/i.test(((x.innerText || '').trim()) || x.getAttribute('aria-label') || ''));
+const btn = [...d.querySelectorAll('ytcp-button, button, [role=button]')].find(x => vis(x) && `+jsExact(phCloseButton.alts)+`.test(((x.innerText || '').trim()) || x.getAttribute('aria-label') || ''));
 if (!btn) return false; btn.click(); return 'closed';`), &closed)
 	if closed == "closed" {
 		r.logf("playbook: closed the \"video processing\" notice")
