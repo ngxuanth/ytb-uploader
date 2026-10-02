@@ -76,12 +76,16 @@ func alts(ps ...phrase) []string {
 	return out
 }
 
-// jsRE is a case-insensitive JS regex literal /(a|b|c)/i for the alternatives,
-// for embedding in a page script.
-func jsRE(as []string) string { return "/(" + strings.Join(as, "|") + ")/i" }
+// reSrc is the alternation "(a|b|c)" for building a RegExp from the phrase,
+// e.g. new RegExp(reSrc(...), 'i') in a script, or passed to it as an arg.
+func reSrc(as []string) string { return "(" + strings.Join(as, "|") + ")" }
 
-// jsExact anchors the match to the whole (trimmed) string: /^(a|b|c)$/i.
-func jsExact(as []string) string { return "/^(" + strings.Join(as, "|") + ")$/i" }
+// reSrcExact anchors the match to the whole (trimmed) string: "^(a|b|c)$".
+func reSrcExact(as []string) string { return "^(" + strings.Join(as, "|") + ")$" }
+
+// jsRE is a case-insensitive JS regex literal /(a|b|c)/i for embedding
+// directly in a page script.
+func jsRE(as []string) string { return "/" + reSrc(as) + "/i" }
 
 // goRE compiles the alternatives to a case-insensitive Go regexp.
 func goRE(as []string) *regexp.Regexp {

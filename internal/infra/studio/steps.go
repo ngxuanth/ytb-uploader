@@ -247,12 +247,10 @@ func (r *Runner) reopenDraft(ctx context.Context, p Page) error {
 	if err != nil {
 		return err
 	}
-	find := iife(`const a = document.querySelector('a[href*="/video/` + r.videoID + `/"], a[href*="youtu.be/` + r.videoID + `"], a[href*="/shorts/` + r.videoID + `"]');
-if (!a) return 'missing';
-const row = a.closest('ytcp-video-row, [role=row], tr') || a.parentElement;
-const b = [...row.querySelectorAll('ytcp-button, button, a, [role=button]')].find(b => ` + jsRE(phEditDraft.alts) + `.test((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')));
-if (!b) return 'not a draft';
-b.click(); return 'ok';`)
+	find := eval("reopen-draft", map[string]string{
+		"videoID":   r.videoID,
+		"editDraft": reSrc(phEditDraft.alts),
+	})
 	var got string
 	err = r.inContentList(ctx, p, channel, func() bool {
 		_ = p.Evaluate(ctx, find, &got)
@@ -513,10 +511,10 @@ func (r *Runner) waitPage(ctx context.Context, p Page, before string) bool {
 // done, the notice only covers the page.
 func (r *Runner) closeProcessingNotice(ctx context.Context, p Page) {
 	var closed any
-	_ = p.Evaluate(ctx, iife(`const d = [...document.querySelectorAll('tp-yt-paper-dialog, ytcp-dialog, [role=dialog]')].find(d => vis(d) && `+jsRE(phProcessingDialog.alts)+`.test(d.innerText || ''));
-if (!d) return false;
-const btn = [...d.querySelectorAll('ytcp-button, button, [role=button]')].find(x => vis(x) && `+jsExact(phCloseButton.alts)+`.test(((x.innerText || '').trim()) || x.getAttribute('aria-label') || ''));
-if (!btn) return false; btn.click(); return 'closed';`), &closed)
+	_ = p.Evaluate(ctx, eval("close-processing-notice", map[string]string{
+		"processing": reSrc(phProcessingDialog.alts),
+		"close":      reSrcExact(phCloseButton.alts),
+	}), &closed)
 	if closed == "closed" {
 		r.logf("playbook: closed the \"video processing\" notice")
 	}

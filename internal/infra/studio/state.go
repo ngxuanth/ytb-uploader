@@ -82,21 +82,16 @@ func (r *Runner) Check(ctx context.Context, p Page) error {
 	return err
 }
 
+// rowJS reads videoID's row in the content list (see js/content-row.js).
 func rowJS(videoID string) string {
-	return iife(`const a = document.querySelector('a[href*="/video/` + videoID + `/"]');
-if (!a) return {found: false};
-const row = a.closest('ytcp-video-row') || a.parentElement;
-const g = c => (row.querySelector('.tablecell-' + c)?.innerText || '').trim().replace(/\s+/g, ' ');
-const draft = [...row.querySelectorAll('ytcp-button, button, a, [role=button]')].some(b => ` + jsRE(phEditDraft.alts) + `.test((b.innerText || '') + ' ' + (b.getAttribute('aria-label') || '')));
-return {found: true, visibility: g('visibility'), restrictions: g('restrictions'), date: g('date'), draft};`)
+	return eval("content-row", map[string]string{
+		"videoID":   videoID,
+		"editDraft": reSrc(phEditDraft.alts),
+	})
 }
 
-const editPageJS = `(() => {
-const box = document.querySelector('#title-textarea #textbox');
-// Each badge has a hidden "-hover" twin; only the shown ones count.
-const res = [...document.querySelectorAll('#video-resolutions [id^="badge-"]')].filter(b => b.offsetParent !== null && !b.id.endsWith('-hover')).map(b => ({name: b.id.replace('badge-', ''), label: b.getAttribute('aria-label') || ''}));
-return {ready: !!box, title: (box?.textContent || '').trim(), filename: (document.querySelector('#original-filename')?.innerText || '').trim(), res};
-})()`
+// editPageJS reads the video's edit page (see js/edit-page.js).
+var editPageJS = eval("edit-page", nil)
 
 // Visibility and resolution words come from the phrase registry (phrases.go).
 var (

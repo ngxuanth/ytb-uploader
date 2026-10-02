@@ -1,6 +1,7 @@
 package studio
 
 import (
+	"embed"
 	"encoding/json"
 	"regexp"
 )
@@ -11,10 +12,42 @@ func js(s string) string {
 	return string(b)
 }
 
-// vis is a JS helper: the element exists and is laid out on screen.
+// vis is a JS helper: the element exists and is laid out on screen. It is the
+// prelude put in scope for every embedded script (see eval).
 const vis = `const vis = e => !!e && e.offsetParent !== null && getComputedStyle(e).visibility !== 'hidden';`
 
 func iife(body string) string { return "(() => { " + vis + " " + body + " })()" }
+
+// Logic-heavy page scripts live as real .js files so they can be read, linted
+// (see scripts_lint_test.go) and edited as JavaScript, not Go strings. Each is
+// an arrow function; eval invokes it with the shared prelude in scope and args
+// passed as JSON.
+//
+//go:embed js/*.js
+var scriptFS embed.FS
+
+func script(name string) string {
+	b, err := scriptFS.ReadFile("js/" + name + ".js")
+	if err != nil {
+		panic("studio: missing embedded script js/" + name + ".js: " + err.Error())
+	}
+	return string(b)
+}
+
+// eval builds the expression to evaluate on the page: the embedded script
+// (name) invoked with args as JSON, with the vis prelude in scope. Pass nil
+// args for a script that takes none.
+func eval(name string, args any) string {
+	call := "()"
+	if args != nil {
+		a, err := json.Marshal(args)
+		if err != nil {
+			a = []byte("null")
+		}
+		call = "(" + string(a) + ")"
+	}
+	return "(() => { " + vis + " return (" + script(name) + ")" + call + "; })()"
+}
 
 var (
 	channelInURL = regexp.MustCompile(`/channel/(UC[\w-]{10,})`)
@@ -23,38 +56,19 @@ var (
 	percent     = regexp.MustCompile(`(\d{1,3})\s*%`)
 )
 
-// interstitialJS closes notices Studio pops up over the upload dialog, such
-// as "to follow YouTube policy, go to 'Use of AI'…". It only clicks a close
-// button whose surrounding block has a known notice text and does not hold
-// the dialog's own controls, so it can never close the upload dialog.
-// The notice and button wordings come from the phrase registry (phrases.go).
-var interstitialJS = `(() => { ` + vis + `
-const notice = ` + jsRE(phAINotice.alts) + `;
-const close = ` + jsExact(phCloseButton.alts) + `;
-const closed = [];
-for (const b of document.querySelectorAll('button, ytcp-button, tp-yt-paper-icon-button, ytcp-icon-button, [role=button]')) {
-  if (!vis(b)) continue;
-  const label = ((b.innerText || '').trim() || b.getAttribute('aria-label') || '').trim();
-  if (!close.test(label)) continue;
-  let a = b.parentElement;
-  for (let i = 0; i < 8 && a; i++, a = a.parentElement) {
-    if (a.querySelector('#title-textarea, #next-button, #privacy-radios, #done-button')) { a = null; break; }
-    if (notice.test(a.innerText || '')) break;
-  }
-  if (a && notice.test(a.innerText || '')) { closed.push((a.innerText || '').trim().slice(0, 100)); b.click(); }
-}
-return closed; })()`
+// interstitialJS closes notices Studio pops up over the upload dialog (see
+// js/interstitial.js). The notice and button wordings come from the phrase
+// registry (phrases.go).
+var interstitialJS = eval("interstitial", map[string]string{
+	"notice": reSrc(phAINotice.alts),
+	"close":  reSrcExact(phCloseButton.alts),
+})
 
 const dialogOpenJS = `(() => { ` + vis + ` return vis(document.querySelector('ytcp-uploads-dialog #title-textarea #textbox')) || vis(document.querySelector('#privacy-radios')) || vis(document.querySelector('ytcp-uploads-dialog #next-button')); })()`
 
-// stepSigJS tells which page of the upload dialog is showing, as far as the
-// DOM says. It is empty when Studio's markup has none of these; doNext then
-// falls back to a fixed pause.
-const stepSigJS = `(() => { ` + vis + `
-const d = document.querySelector('ytcp-uploads-dialog'); if (!d) return '';
-const pages = [...d.querySelectorAll('ytcp-uploads-details, ytcp-uploads-video-elements, ytcp-uploads-checks, ytcp-uploads-review')].filter(vis).map(e => e.tagName.toLowerCase());
-const marks = [...d.querySelectorAll('[aria-selected="true"], [aria-current="step"], [active]')].filter(vis).map(e => (e.id || e.tagName.toLowerCase()) + ':' + (e.innerText || '').trim().slice(0, 20));
-return pages.concat(marks).join('|'); })()`
+// stepSigJS tells which page of the upload dialog is showing (see
+// js/step-signature.js).
+var stepSigJS = eval("step-signature", nil)
 
 const privacyJS = `(() => { ` + vis + ` return vis(document.querySelector('#privacy-radios')); })()`
 
@@ -64,11 +78,11 @@ const nextJS = `(() => { const b = document.querySelector('#next-button');
 if (!b || b.hasAttribute('disabled') || b.getAttribute('aria-disabled') === 'true') return false;
 b.click(); return true; })()`
 
-// publishedJS holds once Studio confirmed the save: the share dialog, the
-// "video processing" notice, or the upload dialog gone.
-var publishedJS = iife(`if (vis(document.querySelector('ytcp-video-share-dialog'))) return true;
-if ([...document.querySelectorAll('tp-yt-paper-dialog, ytcp-dialog, [role=dialog]')].some(d => vis(d) && ` + jsRE(alts(phProcessingDialog, phVideoSaved)) + `.test(d.innerText || ''))) return true;
-return !vis(document.querySelector('#done-button')) && !vis(document.querySelector('#privacy-radios')) && location.host === 'studio.youtube.com';`)
+// publishedJS holds once Studio confirmed the save (see js/published.js): the
+// share dialog, a processing / saved confirmation, or the upload dialog gone.
+var publishedJS = eval("published", map[string]string{
+	"confirm": reSrc(alts(phProcessingDialog, phVideoSaved)),
+})
 
 // clickJS is a DOM click on the element, centred first: no animated mouse
 // move, which makes a real click through the extension take seconds.
